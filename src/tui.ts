@@ -5,10 +5,12 @@ import {
   Loader,
   matchesKey,
   ProcessTerminal,
+  SelectList,
   Text,
   TuiMainScreen,
+  type SelectItem,
+  type TUI,
 } from "@earendil-works/pi-tui";
-import type { TUI } from "@earendil-works/pi-tui";
 import {
   AssistantMessageComponent,
   getMarkdownTheme,
@@ -18,6 +20,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Agent, AgentEvent } from "@earendil-works/pi-agent-core";
+import {
+  JudgeCardComponent,
+  isJudgeDetails,
+  judgeAllPassed,
+  judgeFoldedLine,
+  type JudgeDetails,
+} from "./components/judge-card.js";
+import { StatusBar } from "./components/status-bar.js";
+import { BarComponent, RuleComponent, SlashAutocomplete, ToolCallComponent } from "./components/chat-widgets.js";
 import { createModelRuntime, createOiAgent, resolveModel } from "./session.js";
 import { bold, fg } from "./theme.js";
 import { listSessions, loadSession, newSessionId, saveSession } from "./session-store.js";
@@ -28,34 +39,49 @@ const runtime = await createModelRuntime();
 
 const tui: TUI = new TuiMainScreen(new ProcessTerminal());
 const chat = new Container();
+const statusBar = new StatusBar(() => tui.requestRender());
 
 const addLine = (text: string, paddingX = 1) => {
   chat.addChild(new Text(text, paddingX, 0));
   tui.requestRender();
 };
 
+// ---------- header / 帮助 ----------
+
+const ART = [" ___  ___  ___", "| _ \\/ _ \\|_ _|", "|  _/ (_) || |", "|_|  \\___/|___|"];
+
 function addHeader() {
-  addLine(bold(fg.accent("oi-pi")) + fg.dim(" · 信奥助教"), 1);
-  addLine(fg.dim(`${model.name} · /help 查看命令 · Ctrl+C 中断生成，空闲时退出`), 1);
-  addLine("", 0);
+  for (const l of ART) addLine(fg.accent(l), 1);
+  addLine(
+    fg.muted(`信奥助教 · ${agent.state.model.name} · /help 查看命令 · Ctrl+C 中断生成，空闲时退出`),
+    1,
+  );
+  chat.addChild(new RuleComponent());
+  tui.requestRender();
 }
 
 function printHelp() {
   const lines = [
     "/new           新对话（自动保存当前对话，提示词改动此时生效）",
-    "/resume [n]    查看历史会话 / 恢复第 n 个",
-    "/model [n|id]  查看可用模型 / 切换模型",
+    "/resume        打开历史会话选择器",
+    "/model [ref]   打开模型选择器 / 直接切换 provider/id",
     "/exit          退出",
     "/help          显示本帮助",
+    "输入 / 补全命令（Tab 只补全，Enter 补全并发送）；选择器内 ↑↓ 选择，Esc 取消",
   ];
   for (const l of lines) addLine(fg.dim(l));
 }
 
+// ---------- 状态 ----------
+
 // agent 可整体重建（/new、/resume 时重载提示词与模型），事件处理器绑定在 let 变量上
 let agent: Agent = buildAgent();
 let sessionId = newSessionId();
-let streaming: AssistantMessageComponent | null = null;
+let streaming: BarComponent | null = null;
+let streamingMsg: AssistantMessageComponent | null = null;
 let loader: Loader | null = null;
+let openList: SelectList | null = null;
+const toolCalls = new Map<string, ToolCallComponent>();
 let sawError = false;
 
 function buildAgent(): Agent {
@@ -90,85 +116,137 @@ const removeLoader = () => {
   }
 };
 
-function printModelList() {
+// ---------- 消息渲染 ----------
+
+function extractText(content: unknown, sep = " "): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((p: any) => p?.type === "text")
+    .map((p: any) => p.text)
+    .join(sep);
+}
+
+function appendJudgeCard(details: JudgeDetails, errorText?: string): void {
+  if (judgeAllPassed(details)) {
+    chat.addChild(new Text(judgeFoldedLine(details), 0, 0));
+  } else {
+    chat.addChild(new JudgeCardComponent(details, errorText));
+  }
+}
+
+/** 重放历史消息（/resume）：judge 结果重渲染成卡片，其余工具结果收成一行 dim */
+function renderHistory(messages: any[]): void {
+  for (const msg of messages) {
+    if (msg?.role === "user") {
+      chat.addChild(new BarComponent(new UserMessageComponent(extractText(msg.content), getMarkdownTheme()), fg.accent2));
+    } else if (msg?.role === "assistant") {
+      chat.addChild(new BarComponent(new AssistantMessageComponent(msg as AssistantMessage, false, getMarkdownTheme()), fg.accent));
+    } else if (msg?.role === "toolResult") {
+      if (msg.toolName === "judge" && isJudgeDetails(msg.details)) {
+        appendJudgeCard(msg.details as JudgeDetails, extractText(msg.content, "\n"));
+      } else {
+        const summary = typeof msg.details?.summary === "string" ? msg.details.summary : "";
+        const label = `${msg.toolName ?? "tool"} ${summary}`.trim();
+        chat.addChild(new Text(`  ${fg.dim(`┆ ${label}`)}`, 0, 0));
+      }
+    }
+  }
+}
+
+// ---------- 选择器 ----------
+
+function closeSelector(): void {
+  if (!openList) return;
+  chat.removeChild(openList);
+  openList = null;
+  tui.setFocus(editor);
+  tui.requestRender();
+}
+
+function openSelector(items: SelectItem[], onPick: (value: string) => void): void {
+  closeSelector();
+  const list = new SelectList(items, 10, getSelectListTheme());
+  list.onSelect = (item) => {
+    closeSelector();
+    onPick(item.value);
+  };
+  list.onCancel = () => closeSelector();
+  openList = list;
+  chat.addChild(list);
+  tui.setFocus(list);
+  tui.requestRender();
+}
+
+function openModelSelector(): void {
   const list = availableModels();
   if (list.length === 0) {
     addLine(fg.warning("没有可用模型，请检查 ~/.oi-pi/agent/models.json"));
     return;
   }
-  for (const [i, m] of list.entries()) {
+  const items: SelectItem[] = list.map((m) => {
     const current = m.provider === agent.state.model.provider && m.id === agent.state.model.id;
-    addLine(fg[current ? "success" : "dim"](`${i + 1}. ${m.provider}/${m.id}${current ? "  ← 当前" : ""}`));
-  }
-  addLine(fg.dim("/model <序号或 provider/id> 切换"));
+    return {
+      value: `${m.provider}/${m.id}`,
+      label: `${m.name}${current ? "  ← 当前" : ""}`,
+      description: `${m.provider}/${m.id}`,
+    };
+  });
+  openSelector(items, (ref) => switchModel(ref));
 }
 
-function switchModel(arg: string) {
-  const list = availableModels();
-  const index = Number(arg);
-  const target = Number.isInteger(index) && index >= 1 && index <= list.length
-    ? list[index - 1]
-    : list.find((m) => `${m.provider}/${m.id}` === arg || m.id === arg);
-  if (!target) {
-    addLine(fg.warning(`未找到模型「${arg}」，/model 查看列表`));
-    return;
-  }
-  agent.state.model = target;
-  saveCurrent();
-  addLine(fg.dim(`已切换到 ${target.name}（${target.provider}/${target.id}）`));
-}
-
-function printResumeList() {
+function openResumeSelector(): void {
   const sessions = listSessions();
   if (sessions.length === 0) {
     addLine(fg.dim("还没有历史会话"));
     return;
   }
-  sessions.slice(0, 10).forEach((s, i) => {
-    const when = s.savedAt.slice(0, 16).replace("T", " ");
-    addLine(`${fg.accent(`${i + 1}.`)} ${s.title} ${fg.dim(`· ${when} · ${s.messageCount} 条`)}`);
-  });
-  addLine(fg.dim("/resume <序号> 恢复对应会话"));
+  const items: SelectItem[] = sessions.slice(0, 10).map((s) => ({
+    value: s.id,
+    label: s.title,
+    description: `${s.savedAt.slice(0, 16).replace("T", " ")} · ${s.messageCount} 条`,
+  }));
+  openSelector(items, (id) => resumeSession(id));
 }
 
-function resumeSession(arg: string) {
-  const sessions = listSessions();
-  const index = Number(arg);
-  const meta = Number.isInteger(index) && index >= 1 && index <= sessions.length ? sessions[index - 1] : undefined;
-  if (!meta) {
-    addLine(fg.warning("用法：/resume <序号>（/resume 查看列表）"));
+// ---------- 命令 ----------
+
+function switchModel(ref: string): void {
+  const target = availableModels().find((m) => `${m.provider}/${m.id}` === ref || m.id === ref);
+  if (!target) {
+    addLine(fg.warning(`未找到模型「${ref}」，/model 打开选择器`));
     return;
   }
+  agent.state.model = target;
+  statusBar.setModel(target.name);
+  saveCurrent();
+  addLine(fg.dim(`已切换到 ${target.name}（${target.provider}/${target.id}）`));
+}
+
+function resumeSession(id: string): void {
   let loaded;
   try {
-    loaded = loadSession(meta.id);
+    loaded = loadSession(id);
   } catch {
-    addLine(fg.error(`会话文件损坏：${meta.id}`));
+    addLine(fg.error(`会话文件损坏：${id}`));
     return;
   }
   agent = buildAgent(); // 顺带重载提示词
-  sessionId = meta.id;
+  sessionId = id;
   const saved = loaded.model ? runtime.getModel(loaded.model.provider, loaded.model.id) : undefined;
   if (saved) agent.state.model = saved;
   agent.state.messages = loaded.messages;
 
   chat.clear();
   addHeader();
-  for (const msg of loaded.messages) {
-    if (msg?.role === "user") {
-      const text = typeof msg.content === "string"
-        ? msg.content
-        : (Array.isArray(msg.content) ? msg.content : [])
-            .filter((p: any) => p?.type === "text")
-            .map((p: any) => p.text)
-            .join(" ");
-      chat.addChild(new UserMessageComponent(text, getMarkdownTheme()));
-    } else if (msg?.role === "assistant") {
-      chat.addChild(new AssistantMessageComponent(msg as AssistantMessage, false, getMarkdownTheme()));
-    } else if (msg?.role === "toolResult") {
-      addLine(fg.dim("  ⏺ 工具调用结果"), 0);
-    }
+  renderHistory(loaded.messages);
+
+  statusBar.reset();
+  statusBar.setModel(agent.state.model.name);
+  for (const m of loaded.messages) {
+    if (m?.role === "assistant") statusBar.addUsage(m.usage);
   }
+
   addLine(fg.dim(`已恢复 ${loaded.messages.length} 条消息（模型：${agent.state.model.name}）`));
   addLine("", 0);
   tui.requestRender();
@@ -189,7 +267,7 @@ function onSubmit(text: string) {
     } else if (cmd === "/model") {
       if (agent.state.isStreaming) addLine(fg.warning("正在生成中，稍后再切换模型"));
       else if (arg) switchModel(arg);
-      else printModelList();
+      else openModelSelector();
     } else if (cmd === "/new") {
       if (agent.state.isStreaming) {
         addLine(fg.warning("正在生成中，请等当前回答完成或 Ctrl+C 中断后再 /new"));
@@ -198,15 +276,18 @@ function onSubmit(text: string) {
       saveCurrent();
       sessionId = newSessionId();
       agent = buildAgent(); // 重建 = 重读 prompts/*.md，hint/提示词改动此时生效
+      statusBar.reset();
+      statusBar.setModel(agent.state.model.name);
       chat.clear();
       addHeader();
     } else if (cmd === "/resume") {
       if (agent.state.isStreaming) {
         addLine(fg.warning("正在生成中，请等当前回答完成或 Ctrl+C 中断后再 /resume"));
-        return;
+      } else if (arg) {
+        addLine(fg.warning("直接输入 /resume 打开选择器"));
+      } else {
+        openResumeSelector();
       }
-      if (arg) resumeSession(arg);
-      else printResumeList();
     } else if (cmd === "/help") {
       printHelp();
     } else {
@@ -221,72 +302,87 @@ function onSubmit(text: string) {
   }
 
   sawError = false;
-  chat.addChild(new UserMessageComponent(input, getMarkdownTheme()));
+  chat.addChild(new BarComponent(new UserMessageComponent(input, getMarkdownTheme()), fg.accent2));
   loader = new Loader(tui, (s) => fg.accent(s), (s) => fg.muted(s), "思考中…");
   chat.addChild(loader);
+  statusBar.startStreaming();
   agent.prompt(input).catch((err: unknown) => {
     removeLoader();
+    statusBar.stopStreaming();
     const message = err instanceof Error ? err.message : String(err);
     addLine(fg.error(`✗ ${message}`));
   });
   tui.requestRender();
 }
 
+// ---------- agent 事件 ----------
+
 function handleAgentEvent(e: AgentEvent) {
   switch (e.type) {
     case "message_start": {
       if (e.message.role !== "assistant") break;
       removeLoader();
-      streaming = new AssistantMessageComponent(e.message as AssistantMessage, false, getMarkdownTheme());
+      streamingMsg = new AssistantMessageComponent(e.message as AssistantMessage, false, getMarkdownTheme());
+      streaming = new BarComponent(streamingMsg, fg.accent);
       chat.addChild(streaming);
       tui.requestRender();
       break;
     }
     case "message_update": {
-      if (e.message.role !== "assistant" || !streaming) break;
-      streaming.updateContent(e.message as AssistantMessage, true);
+      if (e.message.role !== "assistant" || !streamingMsg) break;
+      streamingMsg.updateContent(e.message as AssistantMessage, true);
       tui.requestRender();
       break;
     }
     case "message_end": {
       if (e.message.role !== "assistant") break;
       const msg = e.message as AssistantMessage;
-      streaming?.updateContent(msg, false);
+      streamingMsg?.updateContent(msg, false);
       streaming = null;
+      streamingMsg = null;
       if (msg.stopReason === "error") {
         sawError = true;
         addLine(fg.error(`✗ API 错误：${msg.errorMessage ?? "未知"}`));
       } else if (msg.stopReason === "aborted") {
         addLine(fg.warning("⏹ 已中断"));
-      } else if (msg.usage) {
-        const { input, output, cost } = msg.usage;
-        addLine(fg.dim(`  ⤷ ${input + output} tok · $${cost.total.toFixed(4)}`));
       }
+      statusBar.addUsage(msg.usage); // 累计进状态栏，不再逐条打 ⤷ 行
       addLine("", 0);
       tui.requestRender();
       break;
     }
-    case "tool_execution_update": {
-      const summary = e.partialResult?.details?.summary;
-      if (typeof summary === "string") addLine(fg.dim(`  ├ ${e.toolName} ${summary}`));
+    case "tool_execution_start": {
+      const comp = new ToolCallComponent(e.toolName);
+      toolCalls.set(e.toolCallId, comp);
+      chat.addChild(comp);
+      tui.requestRender();
       break;
     }
-    case "tool_execution_start": {
-      addLine(fg.accent(`⏺ ${e.toolName} 运行中…`));
+    case "tool_execution_update": {
+      const comp = toolCalls.get(e.toolCallId);
+      const summary = e.partialResult?.details?.summary;
+      if (comp && typeof summary === "string") comp.setUpdate(summary);
       break;
     }
     case "tool_execution_end": {
-      const summary =
-        typeof e.result?.details?.summary === "string"
-          ? e.result.details.summary
-          : e.isError
-            ? "失败"
-            : "完成";
-      addLine(fg[e.isError ? "error" : "success"](`⏺ ${e.toolName} ${summary}`));
+      const comp = toolCalls.get(e.toolCallId);
+      toolCalls.delete(e.toolCallId);
+      const details = e.result?.details;
+      if (e.toolName === "judge" && !e.isError && isJudgeDetails(details)) {
+        // 整块替换运行中行，卡片成为唯一记录
+        if (comp) chat.removeChild(comp);
+        appendJudgeCard(details as JudgeDetails, extractText(e.result?.content, "\n"));
+      } else {
+        const summary =
+          typeof details?.summary === "string" ? details.summary : e.isError ? "失败" : "完成";
+        comp?.finish(`  ${e.isError ? fg.error("✗") : fg.success("✓")} ${fg.text(e.toolName)} ${fg.dim(summary)}`);
+      }
+      tui.requestRender();
       break;
     }
     case "agent_end": {
       removeLoader();
+      statusBar.stopStreaming();
       const err = agent.state.errorMessage;
       if (!sawError && err) addLine(fg.error(`✗ ${err}`));
       saveCurrent(); // 每轮结束落盘
@@ -296,19 +392,31 @@ function handleAgentEvent(e: AgentEvent) {
   }
 }
 
-const editor = new Editor(tui, {
-  borderColor: (s) => fg.border(s),
-  selectList: getSelectListTheme(),
-});
+// ---------- 组装 ----------
+
+const editor = new Editor(
+  tui,
+  {
+    borderColor: (s) => fg.border(s),
+    selectList: getSelectListTheme(),
+  },
+  { autocompleteMaxVisible: 8 },
+);
 editor.onSubmit = onSubmit;
+editor.setAutocompleteProvider?.(new SlashAutocomplete());
 
 tui.addChild(chat);
 tui.addChild(editor);
+tui.addChild(statusBar);
 tui.setFocus(editor);
 
-// raw mode 下 Ctrl+C 不产生 SIGINT，统一在这里拦截：生成中中断，空闲时退出
+// raw mode 下 Ctrl+C 不产生 SIGINT，统一在这里拦截：选择器开着先关，生成中中断，空闲时退出
 tui.addInputListener((data) => {
   if (!matchesKey(data, "ctrl+c")) return;
+  if (openList) {
+    closeSelector();
+    return;
+  }
   if (agent.state.isStreaming) {
     agent.abort();
     return;
@@ -318,6 +426,6 @@ tui.addInputListener((data) => {
   process.exit(0);
 });
 
-const model = resolveModel(runtime);
+statusBar.setModel(agent.state.model.name);
 addHeader();
 tui.start();

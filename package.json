@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/tui.ts",
-    "smoke": "tsx src/smoke.ts"
+    "smoke": "tsx src/smoke.ts",
+    "smoke:ui": "tsx src/smoke-components.ts",
+    "smoke:judge": "tsx src/smoke-judge-e2e.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.85.1",

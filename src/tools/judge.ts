@@ -159,6 +159,8 @@ export const judgeTool: AgentTool<typeof Parameters, JudgeDetails> = {
           passed++;
         } else {
           verdict = "WA";
+          // 普通对比的 WA 把差异写进 note，供 TUI 判题卡片直接展示
+          note = `期望 ${clip(JSON.stringify(test.expectedOutput), 60)} · 实际 ${clip(JSON.stringify(r.stdout), 60)}`;
         }
         outcomes.push({ name, verdict, timeMs: Math.round(r.timeMs), note });
 
