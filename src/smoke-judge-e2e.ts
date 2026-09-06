@@ -1,4 +1,4 @@
-// 临时 e2e：真实运行 judge 工具，验证 WA note（期望/实际对比）
+// judge 冒烟（pnpm smoke:judge）：真实编译判题，验证 WA note（期望/实际对比），不需要模型 API
 import { judgeTool } from "../src/tools/judge.js";
 
 const r = await judgeTool.execute("t1", {

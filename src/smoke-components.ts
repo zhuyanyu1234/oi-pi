@@ -1,4 +1,4 @@
-// 临时冒烟：组件渲染与补全逻辑验证（不进 TUI 循环）
+// 组件冒烟（pnpm smoke:ui）：渲染与补全逻辑验证，不进 TUI 循环、不需要模型 API
 import { Text } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { JudgeCardComponent, judgeAllPassed, judgeFoldedLine, type JudgeDetails } from "../src/components/judge-card.js";
