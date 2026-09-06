@@ -1,5 +1,5 @@
 // judge 冒烟（pnpm smoke:judge）：真实编译判题，验证 WA note（期望/实际对比），不需要模型 API
-import { judgeTool } from "../src/tools/judge.js";
+import { judgeTool } from "./tools/judge.js";
 
 const r = await judgeTool.execute("t1", {
   code: '#include <bits/stdc++.h>\nusing namespace std;\nint main(){int a,b;cin>>a>>b;cout<<a+b+1<<endl;}',

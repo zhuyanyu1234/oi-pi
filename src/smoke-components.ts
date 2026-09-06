@@ -1,8 +1,8 @@
 // 组件冒烟（pnpm smoke:ui）：渲染与补全逻辑验证，不进 TUI 循环、不需要模型 API
 import { Text } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { JudgeCardComponent, judgeAllPassed, judgeFoldedLine, type JudgeDetails } from "../src/components/judge-card.js";
-import { StatusBar } from "../src/components/status-bar.js";
+import { JudgeCardComponent, judgeAllPassed, judgeFoldedLine, type JudgeDetails } from "./components/judge-card.js";
+import { StatusBar } from "./components/status-bar.js";
 import { BarComponent, SlashAutocomplete } from "./components/chat-widgets.js";
 
 const allAC: JudgeDetails = {
