@@ -1,10 +1,11 @@
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { AGENT_DIR, parseModelRef } from "./config.js";
 import { KNOWLEDGE_PROMPT_PATH, SYSTEM_PROMPT_PATH, readPromptFile, tryReadPromptFile } from "./prompts.js";
 import { complexityTool } from "./tools/complexity.js";
+import { createFileTools, type DeleteConfirm } from "./tools/files.js";
 import { hintTool } from "./tools/hint.js";
 import { judgeTool } from "./tools/judge.js";
 import { stressTool } from "./tools/stress.js";
@@ -41,23 +42,36 @@ export function resolveModel(runtime: ModelRuntime) {
 
 const DEFAULT_TOOLS: AgentTool<any>[] = [judgeTool, stressTool, complexityTool, hintTool];
 
+export const THINKING_LEVELS = new Set<string>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function envThinkingLevel(): ThinkingLevel {
+  const raw = process.env.OI_PI_THINKING ?? "off";
+  return (THINKING_LEVELS.has(raw) ? raw : "off") as ThinkingLevel;
+}
+
 /**
  * 组装一个 agent 会话。主界面和将来的子 agent 都走这个工厂：
  * 换 systemPrompt / tools 即可派生出不同角色，模型运行时（凭据、目录）复用同一份。
  */
 export function createOiAgent(
   runtime: ModelRuntime,
-  options?: { systemPrompt?: string; tools?: AgentTool<any>[] },
+  options?: {
+    systemPrompt?: string;
+    tools?: AgentTool<any>[];
+    thinkingLevel?: ThinkingLevel;
+    confirmDelete?: DeleteConfirm;
+  },
 ): Agent {
   const model = resolveModel(runtime);
   const streamFn: StreamFn = (m, context, opts) => runtime.streamSimple(m, context, opts);
+  const tools = options?.tools ?? [...DEFAULT_TOOLS, ...createFileTools({ confirmDelete: options?.confirmDelete ?? (async () => false) })];
   return new Agent({
     streamFn,
     initialState: {
       systemPrompt: options?.systemPrompt ?? loadSystemPrompt(),
       model,
-      thinkingLevel: "off",
-      tools: options?.tools ?? DEFAULT_TOOLS,
+      thinkingLevel: options?.thinkingLevel ?? envThinkingLevel(),
+      tools,
     },
   });
 }

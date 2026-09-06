@@ -13,6 +13,9 @@ try {
 /** 本应用独立配置目录（与 pi 的 ~/.pi/agent 完全隔离） */
 export const AGENT_DIR = process.env.OI_PI_AGENT_DIR ?? join(homedir(), ".oi-pi", "agent");
 
+/** agent 文件工具的允许根目录：默认进程 cwd，可用 OI_PI_WORKSPACE 覆盖；/tmp 始终额外放行 */
+export const WORKSPACE_ROOT = process.env.OI_PI_WORKSPACE ?? process.cwd();
+
 /** 模型引用，格式 provider/modelId，默认走 ~/.oi-pi/agent/models.json 里的 agnes */
 export const MODEL_REF = process.env.OI_PI_MODEL ?? "agnes/agnes-2.5-flash";
 

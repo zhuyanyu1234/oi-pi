@@ -19,7 +19,7 @@ import {
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { Agent, AgentEvent } from "@earendil-works/pi-agent-core";
+import type { Agent, AgentEvent, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   JudgeCardComponent,
   isJudgeDetails,
@@ -29,7 +29,7 @@ import {
 } from "./components/judge-card.js";
 import { StatusBar } from "./components/status-bar.js";
 import { BarComponent, RuleComponent, SlashAutocomplete, ToolCallComponent } from "./components/chat-widgets.js";
-import { createModelRuntime, createOiAgent, resolveModel } from "./session.js";
+import { createModelRuntime, createOiAgent, THINKING_LEVELS } from "./session.js";
 import { bold, fg } from "./theme.js";
 import { listSessions, loadSession, newSessionId, saveSession } from "./session-store.js";
 
@@ -65,6 +65,7 @@ function printHelp() {
     "/new           新对话（自动保存当前对话，提示词改动此时生效）",
     "/resume        打开历史会话选择器",
     "/model [ref]   打开模型选择器 / 直接切换 provider/id",
+    "/thinking [级] 查看/切换思维链深度（off|minimal|low|medium|high|xhigh|max，模型需支持）",
     "/exit          退出",
     "/help          显示本帮助",
     "输入 / 补全命令（Tab 只补全，Enter 补全并发送）；选择器内 ↑↓ 选择，Esc 取消",
@@ -82,10 +83,11 @@ let streamingMsg: AssistantMessageComponent | null = null;
 let loader: Loader | null = null;
 let openList: SelectList | null = null;
 const toolCalls = new Map<string, ToolCallComponent>();
+let msgStartAt: number | null = null;
 let sawError = false;
 
 function buildAgent(): Agent {
-  const a = createOiAgent(runtime);
+  const a = createOiAgent(runtime, { confirmDelete: confirmDeleteInTui });
   a.subscribe(handleAgentEvent);
   return a;
 }
@@ -141,7 +143,16 @@ function renderHistory(messages: any[]): void {
     if (msg?.role === "user") {
       chat.addChild(new BarComponent(new UserMessageComponent(extractText(msg.content), getMarkdownTheme()), fg.accent2));
     } else if (msg?.role === "assistant") {
-      chat.addChild(new BarComponent(new AssistantMessageComponent(msg as AssistantMessage, false, getMarkdownTheme()), fg.accent));
+      const hasThinking = (msg.content as any[] | undefined)?.some?.(
+        (c) => c?.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim(),
+      ) ?? false;
+      const comp = new AssistantMessageComponent(
+        msg as AssistantMessage,
+        hasThinking,
+        getMarkdownTheme(),
+        hasThinking ? "💭 已思考（点击展开）" : undefined,
+      );
+      chat.addChild(new BarComponent(comp, fg.accent));
     } else if (msg?.role === "toolResult") {
       if (msg.toolName === "judge" && isJudgeDetails(msg.details)) {
         appendJudgeCard(msg.details as JudgeDetails, extractText(msg.content, "\n"));
@@ -156,26 +167,59 @@ function renderHistory(messages: any[]): void {
 
 // ---------- 选择器 ----------
 
-function closeSelector(): void {
+let selectorCancelHook: (() => void) | null = null;
+
+function closeSelector(notifyCancel = false): void {
   if (!openList) return;
   chat.removeChild(openList);
   openList = null;
   tui.setFocus(editor);
   tui.requestRender();
+  const hook = selectorCancelHook;
+  selectorCancelHook = null;
+  if (notifyCancel) hook?.();
 }
 
-function openSelector(items: SelectItem[], onPick: (value: string) => void): void {
+function openSelector(items: SelectItem[], onPick: (value: string) => void, onCancel?: () => void): void {
   closeSelector();
   const list = new SelectList(items, 10, getSelectListTheme());
   list.onSelect = (item) => {
     closeSelector();
     onPick(item.value);
   };
-  list.onCancel = () => closeSelector();
+  list.onCancel = () => closeSelector(true);
+  selectorCancelHook = onCancel ?? null;
   openList = list;
   chat.addChild(list);
   tui.setFocus(list);
   tui.requestRender();
+}
+
+/** agent 调 delete_file 时的 TUI 交互确认：用户明确选择「确认」才返回 true */
+function confirmDeleteInTui(target: string, signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(watch);
+      resolve(v);
+    };
+    const watch = setInterval(() => {
+      if (signal?.aborted) {
+        closeSelector(true);
+        finish(false);
+      }
+    }, 200);
+    openSelector(
+      [
+        { value: "yes", label: `删除 ${target}`, description: "确认删除（不可恢复）" },
+        { value: "no", label: "取消", description: "保留文件" },
+      ],
+      (v) => finish(v === "yes"),
+      () => finish(false),
+    );
+  });
 }
 
 function openModelSelector(): void {
@@ -288,6 +332,17 @@ function onSubmit(text: string) {
       } else {
         openResumeSelector();
       }
+    } else if (cmd === "/thinking") {
+      if (agent.state.isStreaming) {
+        addLine(fg.warning("正在生成中，稍后再切换思维链深度"));
+      } else if (!arg) {
+        addLine(fg.dim(`当前思维链深度：${agent.state.thinkingLevel}（/thinking off|minimal|low|medium|high|xhigh|max）`));
+      } else if (!THINKING_LEVELS.has(arg)) {
+        addLine(fg.warning(`无效级别「${arg}」，可选 off|minimal|low|medium|high|xhigh|max`));
+      } else {
+        agent.state.thinkingLevel = arg as ThinkingLevel;
+        addLine(fg.dim(`思维链深度已切换 → ${arg}`));
+      }
     } else if (cmd === "/help") {
       printHelp();
     } else {
@@ -322,6 +377,7 @@ function handleAgentEvent(e: AgentEvent) {
     case "message_start": {
       if (e.message.role !== "assistant") break;
       removeLoader();
+      msgStartAt = Date.now();
       streamingMsg = new AssistantMessageComponent(e.message as AssistantMessage, false, getMarkdownTheme());
       streaming = new BarComponent(streamingMsg, fg.accent);
       chat.addChild(streaming);
@@ -337,6 +393,14 @@ function handleAgentEvent(e: AgentEvent) {
     case "message_end": {
       if (e.message.role !== "assistant") break;
       const msg = e.message as AssistantMessage;
+      // 思维链结束后自动收起成一行标签（点击可展开）；生成中保持展开流出
+      const hasThinking = msg.content.some((c) => c.type === "thinking" && c.thinking.trim());
+      const elapsedS = msgStartAt !== null ? Math.max(1, Math.round((Date.now() - msgStartAt) / 1000)) : 0;
+      msgStartAt = null;
+      if (hasThinking && streamingMsg) {
+        streamingMsg.setHiddenThinkingLabel(`💭 已思考 ${elapsedS}s（点击展开）`);
+        streamingMsg.setHideThinkingBlock(true);
+      }
       streamingMsg?.updateContent(msg, false);
       streaming = null;
       streamingMsg = null;
@@ -410,11 +474,11 @@ tui.addChild(editor);
 tui.addChild(statusBar);
 tui.setFocus(editor);
 
-// raw mode 下 Ctrl+C 不产生 SIGINT，统一在这里拦截：选择器开着先关，生成中中断，空闲时退出
+// raw mode 下 Ctrl+C 不产生 SIGINT，统一在这里拦截：选择器开着先关闭（视作取消），生成中中断，空闲时退出
 tui.addInputListener((data) => {
   if (!matchesKey(data, "ctrl+c")) return;
   if (openList) {
-    closeSelector();
+    closeSelector(true);
     return;
   }
   if (agent.state.isStreaming) {

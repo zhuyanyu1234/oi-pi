@@ -60,6 +60,7 @@ export const COMMANDS: AutocompleteItem[] = [
   { value: "/new", label: "/new", description: "新对话（自动保存当前对话）" },
   { value: "/resume", label: "/resume", description: "打开历史会话选择器" },
   { value: "/model", label: "/model", description: "打开模型选择器" },
+  { value: "/thinking", label: "/thinking", description: "思维链深度 off/low/medium/high" },
   { value: "/exit", label: "/exit", description: "退出" },
   { value: "/help", label: "/help", description: "显示帮助" },
 ];

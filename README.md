@@ -33,6 +33,7 @@
 | `stress` | 对拍/压力测试：随机数据下比对暴力解与优化解的输出 |
 | `complexity` | 复杂度估算：实测运行时间随规模的增长趋势 |
 | `hint` | 维护知识点掌握清单（勾选/取消/标注等级备注） |
+| `read` `write` `edit` `ls` `delete_file` | 文件读写改删与列目录，只允许工作目录（`OI_PI_WORKSPACE`，默认进程 cwd）与 `/tmp`；删除前会在界面弹确认 |
 
 ## 安装
 
@@ -72,6 +73,7 @@ pnpm install
 
 默认使用 `OI_PI_MODEL` 指定的模型（格式 `provider/modelId`，默认 `agnes/agnes-2.5-flash`）；
 也可以在项目根放 `.env` 写环境变量，或用 `OI_PI_AGENT_DIR` 把整个配置目录换到别处。
+其他环境变量：`OI_PI_THINKING`（思维链深度，默认 `off`）、`OI_PI_WORKSPACE`（文件工具允许根目录，默认进程 cwd）。
 
 ## 运行
 
@@ -89,6 +91,7 @@ pnpm smoke:judge    # judge 工具冒烟（本地编译运行，不需要 API）
 | `/new` | 新对话（自动保存当前对话，提示词改动此时生效） |
 | `/resume` | 打开历史会话选择器，恢复后判题卡片原样重渲染 |
 | `/model` | 打开模型选择器；`/model <provider/id>` 直接切换 |
+| `/thinking [级]` | 查看/切换思维链深度；生成中实时流出、回答结束自动收起为「💭 已思考 Xs」，点击展开 |
 | `/exit` | 退出 |
 | `/help` | 帮助 |
 
