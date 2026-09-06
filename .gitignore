@@ -1,4 +1,5 @@
 node_modules
 .mimosa
 .env
-dist*.tgz
+dist
+*.tgz
