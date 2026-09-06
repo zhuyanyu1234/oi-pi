@@ -78,7 +78,21 @@ pnpm install
 ## 运行
 
 ```bash
-pnpm start          # 进入 TUI
+pnpm start          # 开发运行（tsx，免编译）
+pnpm compile        # 编译到 dist/（node dist/tui.js 可直接跑产物）
+pnpm build          # 编译并打包成 npm 包（oi-pi-<版本>.tgz）
+```
+
+打包产物可全局安装为 `oi-pi` 命令（`files` 只带 dist 与 prompts，装完即用）：
+
+```bash
+npm install -g ./oi-pi-1.0.0.tgz   # 发布到 npm 后即 npm install -g oi-pi
+oi-pi                               # 在任意目录启动，工作目录即当前目录
+```
+
+冒烟脚本：
+
+```bash
 pnpm smoke          # 全链路冒烟（需要可用模型 API）
 pnpm smoke:ui       # TUI 组件渲染冒烟（不需要 API）
 pnpm smoke:judge    # judge 工具冒烟（本地编译运行，不需要 API）

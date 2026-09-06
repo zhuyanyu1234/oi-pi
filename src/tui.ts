@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // oi-pi 自研 TUI：pi-tui 组件库 + pi-agent-core Agent 直接组装，不使用 pi 的 InteractiveMode
 import {
   Container,

@@ -1,11 +1,26 @@
 {
   "name": "oi-pi",
   "version": "1.0.0",
-  "private": true,
+  "description": "信奥助教：终端里的 C++ 信息学竞赛教练（提问式教学 + OJ 式判题）",
+  "license": "MIT",
   "type": "module",
+  "bin": {
+    "oi-pi": "dist/tui.js"
+  },
+  "files": [
+    "dist",
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "tsx src/tui.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "compile": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm compile",
+    "build": "pnpm pack",
     "smoke": "tsx src/smoke.ts",
     "smoke:ui": "tsx src/smoke-components.ts",
     "smoke:judge": "tsx src/smoke-judge-e2e.ts"
