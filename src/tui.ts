@@ -85,6 +85,7 @@ let openList: SelectList | null = null;
 const toolCalls = new Map<string, ToolCallComponent>();
 let msgStartAt: number | null = null;
 let sawError = false;
+let sawAbort = false;
 
 function buildAgent(): Agent {
   const a = createOiAgent(runtime, { confirmDelete: confirmDeleteInTui });
@@ -143,16 +144,21 @@ function renderHistory(messages: any[]): void {
     if (msg?.role === "user") {
       chat.addChild(new BarComponent(new UserMessageComponent(extractText(msg.content), getMarkdownTheme()), fg.accent2));
     } else if (msg?.role === "assistant") {
-      const hasThinking = (msg.content as any[] | undefined)?.some?.(
-        (c) => c?.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim(),
-      ) ?? false;
-      const comp = new AssistantMessageComponent(
-        msg as AssistantMessage,
-        hasThinking,
-        getMarkdownTheme(),
-        hasThinking ? "💭 已思考（点击展开）" : undefined,
-      );
-      chat.addChild(new BarComponent(comp, fg.accent));
+      const content = (msg.content ?? []) as any[];
+      const visible =
+        content.some((c) => (c?.type === "text" && c.text?.trim()) || (c?.type === "thinking" && c.thinking?.trim())) ||
+        content.some((c) => c?.type === "toolCall");
+      // 干净结束却空内容的消息直接跳过，不留空 ▌ 条；abort/error 的保留（组件内有状态行）
+      if (visible || msg.stopReason === "aborted" || msg.stopReason === "error") {
+        const hasThinking = content.some((c) => c?.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim());
+        const comp = new AssistantMessageComponent(
+          msg as AssistantMessage,
+          hasThinking,
+          getMarkdownTheme(),
+          hasThinking ? "💭 已思考（点击展开）" : undefined,
+        );
+        chat.addChild(new BarComponent(comp, fg.accent));
+      }
     } else if (msg?.role === "toolResult") {
       if (msg.toolName === "judge" && isJudgeDetails(msg.details)) {
         appendJudgeCard(msg.details as JudgeDetails, extractText(msg.content, "\n"));
@@ -357,6 +363,7 @@ function onSubmit(text: string) {
   }
 
   sawError = false;
+  sawAbort = false;
   chat.addChild(new BarComponent(new UserMessageComponent(input, getMarkdownTheme()), fg.accent2));
   loader = new Loader(tui, (s) => fg.accent(s), (s) => fg.muted(s), "思考中…");
   chat.addChild(loader);
@@ -393,6 +400,9 @@ function handleAgentEvent(e: AgentEvent) {
     case "message_end": {
       if (e.message.role !== "assistant") break;
       const msg = e.message as AssistantMessage;
+      const visible =
+        msg.content.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim())) ||
+        msg.content.some((c) => c.type === "toolCall");
       // 思维链结束后自动收起成一行标签（点击可展开）；生成中保持展开流出
       const hasThinking = msg.content.some((c) => c.type === "thinking" && c.thinking.trim());
       const elapsedS = msgStartAt !== null ? Math.max(1, Math.round((Date.now() - msgStartAt) / 1000)) : 0;
@@ -401,15 +411,23 @@ function handleAgentEvent(e: AgentEvent) {
         streamingMsg.setHiddenThinkingLabel(`💭 已思考 ${elapsedS}s（点击展开）`);
         streamingMsg.setHideThinkingBlock(true);
       }
-      streamingMsg?.updateContent(msg, false);
-      streaming = null;
-      streamingMsg = null;
+      // abort/error 时 pi 组件条内自带状态行（Request aborted / 错误信息），这里不再重复打
       if (msg.stopReason === "error") {
         sawError = true;
         addLine(fg.error(`✗ API 错误：${msg.errorMessage ?? "未知"}`));
       } else if (msg.stopReason === "aborted") {
-        addLine(fg.warning("⏹ 已中断"));
+        sawAbort = true;
+      } else if (!visible && streaming) {
+        // 干净结束却没有任何内容：整块移除空条，不留孤零零的 ▌
+        chat.removeChild(streaming);
+        streaming = null;
+        streamingMsg = null;
+        tui.requestRender();
+        break;
       }
+      streamingMsg?.updateContent(msg, false);
+      streaming = null;
+      streamingMsg = null;
       statusBar.addUsage(msg.usage); // 累计进状态栏，不再逐条打 ⤷ 行
       addLine("", 0);
       tui.requestRender();
@@ -448,7 +466,7 @@ function handleAgentEvent(e: AgentEvent) {
       removeLoader();
       statusBar.stopStreaming();
       const err = agent.state.errorMessage;
-      if (!sawError && err) addLine(fg.error(`✗ ${err}`));
+      if (!sawError && !sawAbort && err) addLine(fg.error(`✗ ${err}`));
       saveCurrent(); // 每轮结束落盘
       tui.requestRender();
       break;
