@@ -1,5 +1,5 @@
 // 会话持久化：对话记录存 ~/.oi-pi/agent/sessions/oi-pi-*.json，/resume 可恢复
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AGENT_DIR } from "./config.js";
 
@@ -73,4 +73,8 @@ export function listSessions(): SessionMeta[] {
 export function loadSession(id: string): { model: SessionModel | undefined; messages: any[] } {
   const parsed = JSON.parse(readFileSync(join(SESSIONS_DIR, `${id}.json`), "utf8"));
   return { model: parsed.model, messages: Array.isArray(parsed.messages) ? parsed.messages : [] };
+}
+
+export function deleteSession(id: string): void {
+  unlinkSync(join(SESSIONS_DIR, `${id}.json`));
 }

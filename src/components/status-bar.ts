@@ -31,6 +31,8 @@ export class StatusBar implements Component {
   private inputTok = 0;
   private outputTok = 0;
   private cost = 0;
+  private ctxUsed = 0;
+  private ctxWindow = 0;
   private spinnerIdx = 0;
   private since: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -41,6 +43,12 @@ export class StatusBar implements Component {
 
   setModel(name: string): void {
     this.model = name;
+  }
+
+  /** 最近一次请求的上下文占用（输入 token）与模型窗口，用于 ctx% 显示 */
+  setContext(used: number, window: number): void {
+    this.ctxUsed = used;
+    if (window > 0) this.ctxWindow = window;
   }
 
   addUsage(usage: UsageLike | undefined): void {
@@ -54,6 +62,7 @@ export class StatusBar implements Component {
     this.inputTok = 0;
     this.outputTok = 0;
     this.cost = 0;
+    this.ctxUsed = 0;
   }
 
   startStreaming(): void {
@@ -76,6 +85,11 @@ export class StatusBar implements Component {
   render(width: number): string[] {
     const parts: string[] = [];
     if (this.model) parts.push(seg(this.model, palette.text));
+    if (this.ctxWindow > 0 && this.ctxUsed > 0) {
+      const pct = this.ctxUsed / this.ctxWindow;
+      const color = pct >= 0.9 ? palette.red : pct >= 0.75 ? palette.yellow : palette.overlay1;
+      parts.push(seg(`ctx ${(pct * 100).toFixed(0)}%`, color));
+    }
     if (this.inputTok + this.outputTok > 0 || this.cost > 0) {
       parts.push(seg(`↑${fmtTok(this.inputTok)} ↓${fmtTok(this.outputTok)} tok`, palette.overlay1));
       if (this.cost > 0) parts.push(seg(`$${this.cost.toFixed(4)}`, palette.overlay1));

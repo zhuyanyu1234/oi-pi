@@ -69,6 +69,10 @@ export class ToolCallComponent implements Component {
 export const COMMANDS: AutocompleteItem[] = [
   { value: "/new", label: "/new", description: "新对话（自动保存当前对话）" },
   { value: "/resume", label: "/resume", description: "打开历史会话选择器" },
+  { value: "/retry", label: "/retry", description: "重试上一轮失败的提问" },
+  { value: "/compact", label: "/compact", description: "压缩对话历史，释放上下文" },
+  { value: "/del", label: "/del", description: "删除历史会话" },
+  { value: "/export", label: "/export", description: "导出当前对话为 Markdown" },
   { value: "/model", label: "/model", description: "打开模型选择器" },
   { value: "/thinking", label: "/thinking", description: "思维链深度 off/low/medium/high" },
   { value: "/exit", label: "/exit", description: "退出" },
