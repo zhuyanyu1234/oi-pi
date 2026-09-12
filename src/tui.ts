@@ -156,7 +156,7 @@ function renderHistory(messages: any[]): void {
           msg as AssistantMessage,
           hasThinking,
           getMarkdownTheme(),
-          hasThinking ? "💭 已思考（点击展开）" : undefined,
+          hasThinking ? "💭 已思考" : undefined,
         );
         chat.addChild(new BarComponent(comp, fg.accent));
       }
@@ -409,7 +409,7 @@ function handleAgentEvent(e: AgentEvent) {
       const elapsedS = msgStartAt !== null ? Math.max(1, Math.round((Date.now() - msgStartAt) / 1000)) : 0;
       msgStartAt = null;
       if (hasThinking && streamingMsg) {
-        streamingMsg.setHiddenThinkingLabel(`💭 已思考 ${elapsedS}s（点击展开）`);
+        streamingMsg.setHiddenThinkingLabel(`💭 已思考 ${elapsedS}s`);
         streamingMsg.setHideThinkingBlock(true);
       }
       // abort/error 时 pi 组件条内自带状态行（Request aborted / 错误信息），这里不再重复打
@@ -458,7 +458,12 @@ function handleAgentEvent(e: AgentEvent) {
       } else {
         const summary =
           typeof details?.summary === "string" ? details.summary : e.isError ? "失败" : "完成";
-        comp?.finish(`  ${e.isError ? fg.error("✗") : fg.success("✓")} ${fg.text(e.toolName)} ${fg.dim(summary)}`);
+        // 失败时把真实报错原因（工具返回的文本）带出来，不然只剩一句「失败」没法排查
+        const detail = e.isError ? extractText(e.result?.content, "\n") || undefined : undefined;
+        comp?.finish(
+          `  ${e.isError ? fg.error("✗") : fg.success("✓")} ${fg.text(e.toolName)} ${fg.dim(summary)}`,
+          detail,
+        );
       }
       tui.requestRender();
       break;

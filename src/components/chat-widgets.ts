@@ -1,5 +1,5 @@
 // 聊天流自绘小组件与斜杠补全：不含 agent 状态，tui.ts 与冒烟测试共用
-import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, type AutocompleteItem, type AutocompleteProvider, type AutocompleteSuggestions, type Component } from "@earendil-works/pi-tui";
 import { fg } from "../theme.js";
 
 /** 左侧角色色条：包住消息组件，宽度让出 2 列 */
@@ -29,10 +29,11 @@ export class RuleComponent implements Component {
   }
 }
 
-/** 工具调用行：运行中 → 结束原地改写；judge 结束后由事件层整块替换成判题卡片 */
+/** 工具调用行：运行中 → 结束原地改写；失败时附报错原因（截断到宽度）；judge 结束后由事件层整块替换成判题卡片 */
 export class ToolCallComponent implements Component {
   private startLine: string;
   private updateLine: string | null = null;
+  private detailLines: string[] | null = null;
 
   constructor(toolName: string) {
     this.startLine = `  ${fg.accent("⏺")} ${fg.text(toolName)} ${fg.dim("运行中…")}`;
@@ -44,13 +45,22 @@ export class ToolCallComponent implements Component {
     this.updateLine = `  ${fg.dim("├")} ${fg.dim(text)}`;
   }
 
-  finish(text: string): void {
+  finish(text: string, detail?: string): void {
     this.startLine = text;
     this.updateLine = null;
+    this.detailLines = detail
+      ? detail.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 2)
+      : null;
   }
 
-  render(): string[] {
-    return this.updateLine ? [this.startLine, this.updateLine] : [this.startLine];
+  render(width: number): string[] {
+    const lines = this.updateLine ? [this.startLine, this.updateLine] : [this.startLine];
+    if (this.detailLines) {
+      for (const l of this.detailLines) {
+        lines.push(`  ${fg.dim("└")} ${fg.dim(truncateToWidth(l, Math.max(width - 8, 1)))}`);
+      }
+    }
+    return lines;
   }
 }
 
