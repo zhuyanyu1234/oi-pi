@@ -3,3 +3,4 @@ node_modules
 .env
 dist
 *.tgz
+test_env
