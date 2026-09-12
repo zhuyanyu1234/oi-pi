@@ -71,6 +71,7 @@ export const COMMANDS: AutocompleteItem[] = [
   { value: "/resume", label: "/resume", description: "打开历史会话选择器" },
   { value: "/retry", label: "/retry", description: "重试上一轮失败的提问" },
   { value: "/compact", label: "/compact", description: "压缩对话历史，释放上下文" },
+  { value: "/fork", label: "/fork", description: "从当前对话分叉出新会话" },
   { value: "/del", label: "/del", description: "删除历史会话" },
   { value: "/export", label: "/export", description: "导出当前对话为 Markdown" },
   { value: "/model", label: "/model", description: "打开模型选择器" },

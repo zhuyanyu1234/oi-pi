@@ -73,7 +73,7 @@ pnpm install
 
 默认使用 `OI_PI_MODEL` 指定的模型（格式 `provider/modelId`，默认 `agnes/agnes-2.5-flash`）；
 也可以在项目根放 `.env` 写环境变量，或用 `OI_PI_AGENT_DIR` 把整个配置目录换到别处。
-其他环境变量：`OI_PI_THINKING`（思维链深度，默认 `off`）、`OI_PI_WORKSPACE`（文件工具允许根目录，默认进程 cwd）。
+其他环境变量：`OI_PI_THINKING`（思维链深度，默认 `off`）、`OI_PI_WORKSPACE`（文件工具允许根目录，默认进程 cwd）、`OI_PI_AUTOCOMPACT`（上下文自动压缩阈值，默认 `0.85`，设 `0` 关闭）。
 
 ## 运行
 
@@ -105,7 +105,8 @@ pnpm smoke:judge    # judge 工具冒烟（本地编译运行，不需要 API）
 | `/new` | 新对话（自动保存当前对话，提示词改动此时生效） |
 | `/resume` | 打开历史会话选择器，恢复后判题卡片原样重渲染 |
 | `/retry` | 重试上一轮失败的提问（自动回退到你的提问处重跑） |
-| `/compact` | 把对话历史压缩成摘要 + 最近几条（上下文吃紧时用） |
+| `/compact` | 把对话历史压缩成摘要 + 最近几条（上下文吃紧时用；超过阈值也会自动压缩，`OI_PI_AUTOCOMPACT=0` 关闭） |
+| `/fork` | 从当前对话分叉出新会话（原会话停在分叉点） |
 | `/del` | 删除历史会话（界面确认后才删） |
 | `/export` | 导出当前对话为 Markdown（落在工作目录） |
 | `/model` | 打开模型选择器；`/model <provider/id>` 直接切换 |
@@ -113,9 +114,24 @@ pnpm smoke:judge    # judge 工具冒烟（本地编译运行，不需要 API）
 | `/exit` | 退出 |
 | `/help` | 帮助 |
 
-Ctrl+C：生成中中断，空闲时退出。**生成中继续打字不会丢**——自动排队，本轮回答结束后发送。
+Ctrl+C / Esc：生成中中断，空闲时 Ctrl+C 退出。**生成中继续打字不会丢**——自动排队，本轮回答结束后发送。
 启动时带参数可直接开问：`oi-pi "合并果子怎么入手？"`。
 会话自动保存在 `~/.oi-pi/agent/sessions/`。
+
+### MCP 接入
+
+编辑 `~/.oi-pi/agent/mcp.json` 接入任意 stdio MCP 服务器，工具在启动时自动挂载（命名 `服务器_工具`）：
+
+```json
+{
+  "servers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    }
+  }
+}
+```
 
 ## License
 

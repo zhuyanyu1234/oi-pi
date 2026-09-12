@@ -60,11 +60,17 @@ export function createOiAgent(
     tools?: AgentTool<any>[];
     thinkingLevel?: ThinkingLevel;
     confirmDelete?: DeleteConfirm;
+    /** 外部接入的工具（如 MCP），追加到默认工具集之后 */
+    mcpTools?: AgentTool<any>[];
   },
 ): Agent {
   const model = resolveModel(runtime);
   const streamFn: StreamFn = (m, context, opts) => runtime.streamSimple(m, context, opts);
-  const tools = options?.tools ?? [...DEFAULT_TOOLS, ...createFileTools({ confirmDelete: options?.confirmDelete ?? (async () => false) })];
+  const tools = options?.tools ?? [
+    ...DEFAULT_TOOLS,
+    ...createFileTools({ confirmDelete: options?.confirmDelete ?? (async () => false) }),
+    ...(options?.mcpTools ?? []),
+  ];
   return new Agent({
     streamFn,
     initialState: {

@@ -51,6 +51,10 @@ export class StatusBar implements Component {
     if (window > 0) this.ctxWindow = window;
   }
 
+  get ctxPct(): number {
+    return this.ctxWindow > 0 && this.ctxUsed > 0 ? this.ctxUsed / this.ctxWindow : 0;
+  }
+
   addUsage(usage: UsageLike | undefined): void {
     if (!usage) return;
     this.inputTok += usage.input ?? 0;
@@ -85,8 +89,8 @@ export class StatusBar implements Component {
   render(width: number): string[] {
     const parts: string[] = [];
     if (this.model) parts.push(seg(this.model, palette.text));
-    if (this.ctxWindow > 0 && this.ctxUsed > 0) {
-      const pct = this.ctxUsed / this.ctxWindow;
+    const pct = this.ctxPct;
+    if (pct > 0) {
       const color = pct >= 0.9 ? palette.red : pct >= 0.75 ? palette.yellow : palette.overlay1;
       parts.push(seg(`ctx ${(pct * 100).toFixed(0)}%`, color));
     }

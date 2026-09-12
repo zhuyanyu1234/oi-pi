@@ -34,12 +34,14 @@ import {
 import { StatusBar } from "./components/status-bar.js";
 import { BarComponent, RuleComponent, SlashAutocomplete, ToolCallComponent } from "./components/chat-widgets.js";
 import { createModelRuntime, createOiAgent, THINKING_LEVELS } from "./session.js";
+import { initMcpTools } from "./mcp.js";
 import { bold, fg } from "./theme.js";
 import { deleteSession, listSessions, loadSession, newSessionId, saveSession } from "./session-store.js";
 
 initTheme("dark");
 
 const runtime = await createModelRuntime();
+const mcpTools = await initMcpTools();
 
 const tui: TUI = new TuiMainScreen(new ProcessTerminal());
 const chat = new Container();
@@ -69,14 +71,15 @@ function printHelp() {
     "/new           新对话（自动保存当前对话，提示词改动此时生效）",
     "/resume        打开历史会话选择器",
     "/retry         重试上一轮失败的提问（回退到提问处重跑）",
-    "/compact       压缩对话历史为摘要（上下文吃紧时用，看状态栏 ctx%）",
+    "/compact       压缩对话历史为摘要（上下文吃紧时用，看状态栏 ctx%；超阈值也会自动压缩）",
+    "/fork          从当前对话分叉出新会话（原会话停在分叉点）",
     "/del           删除历史会话",
     "/export        导出当前对话为 Markdown",
     "/model [ref]   打开模型选择器 / 直接切换 provider/id",
     "/thinking [级] 查看/切换思维链深度（off|minimal|low|medium|high|xhigh|max，模型需支持）",
     "/exit          退出",
     "/help          显示本帮助",
-    "生成中继续打字会排队，本轮结束后自动发送；输入 / 补全命令；选择器内 ↑↓ 选择，Esc 取消",
+    "生成中继续打字会排队，本轮结束后自动发送；Esc/Ctrl+C 中断生成；输入 / 补全命令；选择器内 ↑↓ 选择，Esc 取消",
   ];
   for (const l of lines) addLine(fg.dim(l));
 }
@@ -95,9 +98,16 @@ let msgStartAt: number | null = null;
 let sawError = false;
 let sawAbort = false;
 let lastTurnFailed = false;
+let compacting = false;
+
+// 上下文占用达到该比例自动压缩（agent 空闲时触发）；OI_PI_AUTOCOMPACT=0 关闭
+const AUTOCOMPACT_THRESHOLD = (() => {
+  const v = parseFloat(process.env.OI_PI_AUTOCOMPACT ?? "0.85");
+  return Number.isFinite(v) && v > 0 && v < 1 ? v : 0;
+})();
 
 function buildAgent(): Agent {
-  const a = createOiAgent(runtime, { confirmDelete: confirmDeleteInTui });
+  const a = createOiAgent(runtime, { confirmDelete: confirmDeleteInTui, mcpTools });
   a.subscribe(handleAgentEvent);
   return a;
 }
@@ -333,7 +343,7 @@ function exportSession(): void {
       out.push(`> ⚙️ ${m.toolName ?? "tool"} ${summary}`.trimEnd(), "");
     }
   }
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
   const file = join(WORKSPACE_ROOT, `oi-pi-导出-${stamp}.md`);
   try {
     writeFileSync(file, out.join("\n"), "utf8");
@@ -380,6 +390,9 @@ function resumeSession(id: string): void {
   for (const m of loaded.messages) {
     if (m?.role === "assistant") statusBar.addUsage(m.usage);
   }
+  // ctx% 用历史最后一条 assistant 的输入 token 回填
+  const lastAssistant = [...loaded.messages].reverse().find((m: any) => m?.role === "assistant") as any;
+  statusBar.setContext(Number(lastAssistant?.usage?.input ?? 0), Number(agent.state.model.contextWindow ?? 0));
 
   addLine(fg.dim(`已恢复 ${loaded.messages.length} 条消息（模型：${agent.state.model.name}）`));
   addLine("", 0);
@@ -407,6 +420,10 @@ function onSubmit(text: string) {
         addLine(fg.warning("正在生成中，请等当前回答完成或 Ctrl+C 中断后再 /new"));
         return;
       }
+      if (compacting) {
+        addLine(fg.warning("正在压缩对话，稍后再操作"));
+        return;
+      }
       saveCurrent();
       sessionId = newSessionId();
       agent = buildAgent(); // 重建 = 重读 prompts/*.md，hint/提示词改动此时生效
@@ -417,6 +434,8 @@ function onSubmit(text: string) {
     } else if (cmd === "/resume") {
       if (agent.state.isStreaming) {
         addLine(fg.warning("正在生成中，请等当前回答完成或 Ctrl+C 中断后再 /resume"));
+      } else if (compacting) {
+        addLine(fg.warning("正在压缩对话，稍后再操作"));
       } else if (arg) {
         addLine(fg.warning("直接输入 /resume 打开选择器"));
       } else {
@@ -425,6 +444,8 @@ function onSubmit(text: string) {
     } else if (cmd === "/retry") {
       if (agent.state.isStreaming) {
         addLine(fg.warning("正在生成中，无法重试"));
+      } else if (compacting) {
+        addLine(fg.warning("正在压缩对话，稍后再操作"));
       } else if (!lastTurnFailed) {
         addLine(fg.warning("上一轮没有失败，无需重试"));
       } else {
@@ -459,6 +480,20 @@ function onSubmit(text: string) {
         addLine(fg.warning("正在生成中，稍后再压缩"));
       } else {
         void compactSession();
+      }
+    } else if (cmd === "/fork") {
+      if (agent.state.isStreaming) {
+        addLine(fg.warning("正在生成中，稍后再分叉"));
+      } else if (compacting) {
+        addLine(fg.warning("正在压缩对话，稍后再操作"));
+      } else if (agent.state.messages.length === 0) {
+        addLine(fg.warning("没有可分叉的对话"));
+      } else {
+        saveCurrent(); // 原会话保持在分叉点
+        const forkId = newSessionId();
+        saveSession(forkId, { model: modelRef(), messages: [...agent.state.messages] });
+        sessionId = forkId;
+        addLine(fg.dim("🍴 已分叉出新会话：后续对话写入新会话，原会话停在分叉点"));
       }
     } else if (cmd === "/del") {
       openDeleteSelector();
@@ -611,6 +646,12 @@ function handleAgentEvent(e: AgentEvent) {
         lastTurnFailed = true;
         addLine(fg.error(`✗ ${err}`));
       }
+      // 上下文超阈值：空闲时自动压缩
+      const pct = statusBar.ctxPct;
+      if (!sawAbort && !lastTurnFailed && !compacting && AUTOCOMPACT_THRESHOLD > 0 && pct >= AUTOCOMPACT_THRESHOLD) {
+        addLine(fg.warning(`▤ 上下文已用 ${(pct * 100).toFixed(0)}%，自动压缩（OI_PI_AUTOCOMPACT 可调/关闭）`));
+        void compactSession();
+      }
       saveCurrent(); // 每轮结束落盘
       tui.requestRender();
       break;
@@ -629,66 +670,67 @@ const COMPACT_SYSTEM = `你是对话摘要器。把用户与 AI 信奥教练的�
 直接输出摘要正文，不要寒暄，不要评论。`;
 
 async function compactSession(keep = 2): Promise<void> {
+  if (compacting) return;
   const msgs = agent.state.messages;
   if (msgs.length <= keep + 1) {
     addLine(fg.warning("对话太短，无需压缩"));
     return;
   }
-  const lines: string[] = [];
-  for (const m of msgs) {
-    if (m?.role === "user") {
-      lines.push(`[用户] ${extractText(m.content)}`);
-    } else if (m?.role === "assistant") {
-      const text = (m.content ?? [])
-        .filter((c: any) => c?.type === "text")
-        .map((c: any) => c.text)
-        .join("\n");
-      if (text.trim()) lines.push(`[教练] ${text}`);
-      const tools = (m.content ?? []).filter((c: any) => c?.type === "toolCall").map((c: any) => c?.name);
-      if (tools.length) lines.push(`[教练调用工具] ${tools.join("、")}`);
-    } else if (m?.role === "toolResult") {
-      lines.push(`[工具结果] ${m.toolName ?? "tool"}: ${extractText(m.content).slice(0, 200)}`);
-    }
-  }
-  let transcript = lines.join("\n\n");
-  if (transcript.length > 24000) transcript = transcript.slice(transcript.length - 24000); // 保尾：近期内容更重要
-
-  addLine(fg.dim("▤ 正在压缩对话…"));
-  const summarizer = createOiAgent(runtime, {
-    systemPrompt: COMPACT_SYSTEM,
-    tools: [],
-    thinkingLevel: "off",
-    confirmDelete: async () => false,
-  });
+  compacting = true;
   try {
+    const lines: string[] = [];
+    for (const m of msgs) {
+      if (m?.role === "user") {
+        lines.push(`[用户] ${extractText(m.content)}`);
+      } else if (m?.role === "assistant") {
+        const text = (m.content ?? [])
+          .filter((c: any) => c?.type === "text")
+          .map((c: any) => c.text)
+          .join("\n");
+        if (text.trim()) lines.push(`[教练] ${text}`);
+        const tools = (m.content ?? []).filter((c: any) => c?.type === "toolCall").map((c: any) => c?.name);
+        if (tools.length) lines.push(`[教练调用工具] ${tools.join("、")}`);
+      } else if (m?.role === "toolResult") {
+        lines.push(`[工具结果] ${m.toolName ?? "tool"}: ${extractText(m.content).slice(0, 200)}`);
+      }
+    }
+    let transcript = lines.join("\n\n");
+    if (transcript.length > 24000) transcript = transcript.slice(transcript.length - 24000); // 保尾：近期内容更重要
+
+    addLine(fg.dim("▤ 正在压缩对话…"));
+    const summarizer = createOiAgent(runtime, {
+      systemPrompt: COMPACT_SYSTEM,
+      tools: [],
+      thinkingLevel: "off",
+      confirmDelete: async () => false,
+    });
     await summarizer.prompt(transcript);
+    const lastMsg = summarizer.state.messages.at(-1);
+    const summary =
+      lastMsg?.role === "assistant"
+        ? (lastMsg.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n").trim()
+        : "";
+    if (!summary) throw new Error("摘要为空");
+
+    const kept = msgs.slice(-keep);
+    agent.state.messages = [
+      { role: "user", content: `（此前对话的摘要，供参考）\n${summary}`, timestamp: Date.now() },
+      ...kept,
+    ];
+    const lastAssistant = [...kept].reverse().find((m: any) => m?.role === "assistant") as any;
+    statusBar.setContext(Number(lastAssistant?.usage?.input ?? 0), Number(agent.state.model.contextWindow ?? 0));
+
+    chat.clear();
+    addHeader();
+    renderHistory(agent.state.messages);
+    saveCurrent();
+    addLine(fg.dim(`▤ 已压缩：${msgs.length} 条消息 → 摘要 + 最近 ${kept.length} 条`));
+    tui.requestRender();
   } catch (err: unknown) {
     addLine(fg.error(`✗ 压缩失败：${err instanceof Error ? err.message : String(err)}`));
-    return;
+  } finally {
+    compacting = false;
   }
-  const lastMsg = summarizer.state.messages.at(-1);
-  const summary = lastMsg?.role === "assistant"
-    ? (lastMsg.content ?? []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("\n").trim()
-    : "";
-  if (!summary) {
-    addLine(fg.error("✗ 压缩失败：摘要为空"));
-    return;
-  }
-
-  const kept = msgs.slice(-keep);
-  agent.state.messages = [
-    { role: "user", content: `（此前对话的摘要，供参考）\n${summary}`, timestamp: Date.now() },
-    ...kept,
-  ];
-  const lastAssistant = [...kept].reverse().find((m: any) => m?.role === "assistant") as any;
-  statusBar.setContext(Number(lastAssistant?.usage?.input ?? 0), Number(agent.state.model.contextWindow ?? 0));
-
-  chat.clear();
-  addHeader();
-  renderHistory(agent.state.messages);
-  saveCurrent();
-  addLine(fg.dim(`▤ 已压缩：${msgs.length} 条消息 → 摘要 + 最近 ${kept.length} 条`));
-  tui.requestRender();
 }
 
 // ---------- 组装 ----------
@@ -709,8 +751,13 @@ tui.addChild(editor);
 tui.addChild(statusBar);
 tui.setFocus(editor);
 
-// raw mode 下 Ctrl+C 不产生 SIGINT，统一在这里拦截：选择器开着先关闭（视作取消），生成中中断，空闲时退出
+// raw mode 下 Ctrl+C 不产生 SIGINT，统一在这里拦截：选择器开着先关闭（视作取消），
+// 生成中 Ctrl+C/Esc 中断（Esc 在 / 补全时让路给编辑器），空闲时退出
 tui.addInputListener((data) => {
+  if (matchesKey(data, "escape") && agent.state.isStreaming && !openList && !editor.getText().startsWith("/")) {
+    agent.abort();
+    return { consume: true };
+  }
   if (!matchesKey(data, "ctrl+c")) return;
   if (openList) {
     closeSelector(true);
@@ -727,6 +774,9 @@ tui.addInputListener((data) => {
 
 statusBar.setModel(agent.state.model.name);
 addHeader();
+if (mcpTools.length > 0) {
+  addLine(fg.muted(`已接入 MCP 工具：${mcpTools.map((t) => t.name).join("、")}`), 1);
+}
 tui.start();
 
 // 命令行带了初始问题（oi-pi "两数之和怎么入手"）就直接开问
