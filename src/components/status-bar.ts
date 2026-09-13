@@ -55,6 +55,11 @@ export class StatusBar implements Component {
     return this.ctxWindow > 0 && this.ctxUsed > 0 ? this.ctxUsed / this.ctxWindow : 0;
   }
 
+  /** /status 自检用的只读快照 */
+  get snapshot(): { inputTok: number; outputTok: number; cost: number; ctxPct: number; ctxWindow: number } {
+    return { inputTok: this.inputTok, outputTok: this.outputTok, cost: this.cost, ctxPct: this.ctxPct, ctxWindow: this.ctxWindow };
+  }
+
   addUsage(usage: UsageLike | undefined): void {
     if (!usage) return;
     this.inputTok += usage.input ?? 0;

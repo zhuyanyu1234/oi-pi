@@ -70,12 +70,14 @@ function printHelp() {
   const lines = [
     "/new           新对话（自动保存当前对话，提示词改动此时生效）",
     "/resume        打开历史会话选择器",
-    "/retry         重试上一轮失败的提问（回退到提问处重跑）",
+    "/retry         重试上一轮失败的提问（限流/超时类错误会自动退避重试 ≤2 次）",
+    "/rewind        回退到历史任意提问处：原样重跑或撤掉重新输入",
     "/compact       压缩对话历史为摘要（上下文吃紧时用，看状态栏 ctx%；超阈值也会自动压缩）",
     "/fork          从当前对话分叉出新会话（原会话停在分叉点）",
     "/del           删除历史会话",
     "/export        导出当前对话为 Markdown",
     "/model [ref]   打开模型选择器 / 直接切换 provider/id",
+    "/status        查看模型/上下文占用/累计用量/工具清单/会话信息",
     "/thinking [级] 查看/切换思维链深度（off|minimal|low|medium|high|xhigh|max，模型需支持）",
     "/exit          退出",
     "/help          显示本帮助",
@@ -98,6 +100,7 @@ let msgStartAt: number | null = null;
 let sawError = false;
 let sawAbort = false;
 let lastTurnFailed = false;
+let autoRetries = 0;
 let compacting = false;
 
 // 上下文占用达到该比例自动压缩（agent 空闲时触发）；OI_PI_AUTOCOMPACT=0 关闭
@@ -385,14 +388,7 @@ function resumeSession(id: string): void {
   addHeader();
   renderHistory(loaded.messages);
 
-  statusBar.reset();
-  statusBar.setModel(agent.state.model.name);
-  for (const m of loaded.messages) {
-    if (m?.role === "assistant") statusBar.addUsage(m.usage);
-  }
-  // ctx% 用历史最后一条 assistant 的输入 token 回填
-  const lastAssistant = [...loaded.messages].reverse().find((m: any) => m?.role === "assistant") as any;
-  statusBar.setContext(Number(lastAssistant?.usage?.input ?? 0), Number(agent.state.model.contextWindow ?? 0));
+  syncStatusFromMessages(loaded.messages);
 
   addLine(fg.dim(`已恢复 ${loaded.messages.length} 条消息（模型：${agent.state.model.name}）`));
   addLine("", 0);
@@ -449,31 +445,8 @@ function onSubmit(text: string) {
       } else if (!lastTurnFailed) {
         addLine(fg.warning("上一轮没有失败，无需重试"));
       } else {
-        const msgs = agent.state.messages;
-        let lastUser = -1;
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i]?.role === "user") {
-            lastUser = i;
-            break;
-          }
-        }
-        if (lastUser === -1) {
-          addLine(fg.warning("没有可重试的提问"));
-          return;
-        }
-        // 回退失败轮（assistant + 半截 toolResult），从你的提问处重跑
-        agent.state.messages = msgs.slice(0, lastUser + 1);
-        sawError = false;
-        sawAbort = false;
-        lastTurnFailed = false;
-        addLine(fg.dim("↻ 已回退到你的提问，重试中…"));
-        statusBar.startStreaming();
-        agent.continue().catch((err: unknown) => {
-          statusBar.stopStreaming();
-          lastTurnFailed = true;
-          addLine(fg.error(`✗ ${err instanceof Error ? err.message : String(err)}`));
-        });
-        tui.requestRender();
+        autoRetries = 0; // 手动接管，自动重试预算重置
+        rerunLastQuestion("重试");
       }
     } else if (cmd === "/compact") {
       if (agent.state.isStreaming) {
@@ -499,6 +472,72 @@ function onSubmit(text: string) {
       openDeleteSelector();
     } else if (cmd === "/export") {
       exportSession();
+    } else if (cmd === "/rewind") {
+      if (agent.state.isStreaming || compacting) {
+        addLine(fg.warning("稍等，当前有事在进行"));
+        return;
+      }
+      const msgs = agent.state.messages;
+      const questions = msgs
+        .map((m, i) => (m?.role === "user" ? { idx: i, text: extractText(m.content) } : null))
+        .filter((q): q is { idx: number; text: string } => q !== null && q.text.trim() !== "");
+      if (questions.length === 0) {
+        addLine(fg.warning("没有可回退的提问"));
+        return;
+      }
+      const items: SelectItem[] = questions.slice(-10).reverse().map((q) => {
+        const flat = q.text.replace(/\s+/g, " ");
+        return {
+          value: String(q.idx),
+          label: flat.length > 36 ? `${flat.slice(0, 36)}…` : flat,
+          description: `第 ${q.idx + 1} 条消息`,
+        };
+      });
+      openSelector(items, (v) => {
+        const idx = Number(v);
+        const qText = items.find((i) => i.value === v)?.label ?? "";
+        openSelector(
+          [
+            { value: "rerun", label: "重跑该问题", description: "回退后立即重新生成回答" },
+            { value: "edit", label: "回退后自己重新输入", description: "撤掉这条提问及其后的内容" },
+          ],
+          (choice) => {
+            const keep = choice === "rerun" ? idx + 1 : idx;
+            agent.state.messages = msgs.slice(0, keep);
+            chat.clear();
+            addHeader();
+            renderHistory(agent.state.messages);
+            syncStatusFromMessages(agent.state.messages);
+            saveCurrent();
+            sawError = false;
+            sawAbort = false;
+            lastTurnFailed = false;
+            autoRetries = 0;
+            if (choice === "rerun") {
+              addLine(fg.dim(`⏪ 已回退并重跑：${qText}`));
+              statusBar.startStreaming();
+              agent.continue().catch((err: unknown) => {
+                statusBar.stopStreaming();
+                lastTurnFailed = true;
+                addLine(fg.error(`✗ ${err instanceof Error ? err.message : String(err)}`));
+              });
+            } else {
+              addLine(fg.dim(`⏪ 已回退：撤掉了 ${msgs.length - keep} 条消息，重新提问吧`));
+            }
+            tui.requestRender();
+          },
+        );
+      });
+    } else if (cmd === "/status") {
+      const s = statusBar.snapshot;
+      addLine(fg.text("── oi-pi 状态 ──"), 0);
+      addLine(fg.muted(`模型：${agent.state.model.name}（${modelRef().provider}/${modelRef().id}）`));
+      addLine(fg.muted(`上下文窗口：${agent.state.model.contextWindow ?? "?"} tok · 已用 ${(s.ctxPct * 100).toFixed(0)}%`));
+      addLine(fg.muted(`会话累计：↑${s.inputTok} ↓${s.outputTok} tok · $${s.cost.toFixed(4)}`));
+      addLine(fg.muted(`思维链：${agent.state.thinkingLevel} · 自动压缩：${AUTOCOMPACT_THRESHOLD > 0 ? `≥${(AUTOCOMPACT_THRESHOLD * 100).toFixed(0)}%` : "关"}`));
+      addLine(fg.muted(`会话 id：${sessionId}`));
+      addLine(fg.muted(`工作目录：${WORKSPACE_ROOT}`));
+      addLine(fg.muted(`工具（${agent.state.tools.length}）：${agent.state.tools.map((t) => t.name).join("、")}`));
     } else if (cmd === "/thinking") {
       if (agent.state.isStreaming) {
         addLine(fg.warning("正在生成中，稍后再切换思维链深度"));
@@ -531,6 +570,7 @@ function onSubmit(text: string) {
   sawError = false;
   sawAbort = false;
   lastTurnFailed = false;
+  autoRetries = 0;
   chat.addChild(new BarComponent(new UserMessageComponent(input, getMarkdownTheme()), fg.accent2));
   loader = new Loader(tui, (s) => fg.accent(s), (s) => fg.muted(s), "思考中…");
   chat.addChild(loader);
@@ -646,6 +686,21 @@ function handleAgentEvent(e: AgentEvent) {
         lastTurnFailed = true;
         addLine(fg.error(`✗ ${err}`));
       }
+      // 瞬时错误自动重试（退避 ≤2 次）；非瞬时（如 401）不自动，留给 /retry
+      if (lastTurnFailed && autoRetries < 2) {
+        const lastAssistant = [...agent.state.messages].reverse().find((m: any) => m?.role === "assistant") as any;
+        const errMsg = `${err ?? ""} ${lastAssistant?.errorMessage ?? ""}`;
+        if (TRANSIENT_RE.test(errMsg)) {
+          autoRetries++;
+          const delay = 1500 * autoRetries;
+          const agentAtSchedule = agent;
+          addLine(fg.dim(`⟳ 看起来是瞬时错误，${delay / 1000}s 后自动重试（${autoRetries}/2）`));
+          setTimeout(() => {
+            if (agent !== agentAtSchedule) return; // 期间 /new //resume 换了会话，放弃这次自动重试
+            rerunLastQuestion(`自动重试 ${autoRetries}/2`);
+          }, delay);
+        }
+      }
       // 上下文超阈值：空闲时自动压缩
       const pct = statusBar.ctxPct;
       if (!sawAbort && !lastTurnFailed && !compacting && AUTOCOMPACT_THRESHOLD > 0 && pct >= AUTOCOMPACT_THRESHOLD) {
@@ -657,6 +712,64 @@ function handleAgentEvent(e: AgentEvent) {
       break;
     }
   }
+}
+
+// ---------- 重试 / 回退 ----------
+
+// 瞬时错误特征（限流/超时/网络抖动才自动重试，401 之类交给 /retry 手动）
+// "Connection error." 是 openai SDK 对一切连接问题的笼统包装，也视作瞬时
+const TRANSIENT_RE = /rate.?limit|429\b|5\d\d\b|timeout|timed out|econn\w*|fetch failed|network|socket|connection error/i;
+
+/** 把消息截断到最后一条用户提问处（含该提问） */
+function truncateToLastUser(): boolean {
+  const msgs = agent.state.messages;
+  let lastUser = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]?.role === "user") {
+      lastUser = i;
+      break;
+    }
+  }
+  if (lastUser === -1) return false;
+  agent.state.messages = msgs.slice(0, lastUser + 1);
+  return true;
+}
+
+/** 回退失败轮并从提问处重跑；/retry 与瞬时错误自动重试共用 */
+function rerunLastQuestion(reason: string): void {
+  if (agent.state.isStreaming || compacting) {
+    addLine(fg.warning("稍等，当前有事在进行"));
+    return;
+  }
+  if (!truncateToLastUser()) {
+    addLine(fg.warning("没有可重试的提问"));
+    return;
+  }
+  sawError = false;
+  sawAbort = false;
+  lastTurnFailed = false;
+  addLine(fg.dim(`↻ ${reason}：已回退到你的提问，重新生成中…`));
+  statusBar.startStreaming();
+  agent.continue().catch((err: unknown) => {
+    statusBar.stopStreaming();
+    lastTurnFailed = true;
+    addLine(fg.error(`✗ ${err instanceof Error ? err.message : String(err)}`));
+  });
+  tui.requestRender();
+}
+
+/** 按当前消息列表重算状态栏（累计用量 + ctx%），/resume 与 /rewind 共用 */
+function syncStatusFromMessages(messages: any[]): void {
+  statusBar.reset();
+  statusBar.setModel(agent.state.model.name);
+  let lastIn = 0;
+  for (const m of messages) {
+    if (m?.role === "assistant") {
+      statusBar.addUsage(m.usage);
+      lastIn = Number((m as any)?.usage?.input ?? lastIn);
+    }
+  }
+  statusBar.setContext(lastIn, Number(agent.state.model.contextWindow ?? 0));
 }
 
 // ---------- 上下文压缩 ----------
