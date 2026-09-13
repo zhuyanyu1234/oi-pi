@@ -102,12 +102,16 @@ export class JudgeCardComponent implements Component {
     const d = this.details;
     if (d.tests.length === 0) return this.errorRows(inner);
 
+    // 列对齐：测试点名、verdict、耗时各自按最宽者对齐
+    const nameW = Math.max(...d.tests.map((t) => visibleWidth(t.name)));
+    const verdictW = Math.max(...d.tests.map((t) => t.verdict.length), 2);
     const out: string[] = [];
     for (const t of d.tests) {
       const color = COLORS[t.verdict] ?? fg.error;
       const icon = ICONS[t.verdict] ?? "✗";
-      let cell = ` ${color(icon)} ${fg.text(t.name)} ${fg.dim("·")} ${color(t.verdict)}`;
-      if (t.timeMs !== undefined) cell += ` ${fg.dim(`· ${t.timeMs}ms`)}`;
+      const namePad = " ".repeat(Math.max(nameW - visibleWidth(t.name), 0));
+      const verdictCol = color(t.verdict + " ".repeat(Math.max(verdictW - t.verdict.length, 0)));
+      let cell = ` ${color(icon)} ${fg.text(t.name)}${fg.dim(namePad)}  ${verdictCol}  ${fg.dim(`${t.timeMs ?? 0}ms`)}`;
       if (t.note) {
         const room = inner - visibleWidth(cell) - 2;
         const note = clipToWidth(t.note, room);

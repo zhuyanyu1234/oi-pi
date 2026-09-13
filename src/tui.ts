@@ -20,9 +20,9 @@ import {
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
-import { writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { WORKSPACE_ROOT } from "./config.js";
+import { AGENT_DIR, WORKSPACE_ROOT } from "./config.js";
 import type { Agent, AgentEvent, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   JudgeCardComponent,
@@ -38,7 +38,19 @@ import { initMcpTools } from "./mcp.js";
 import { bold, fg } from "./theme.js";
 import { deleteSession, listSessions, loadSession, newSessionId, saveSession } from "./session-store.js";
 
-initTheme("dark");
+// 自带 Catppuccin Mocha 主题：把主题文件装进 agent 目录的 themes/ 后按名加载，
+// pi 渲染的一切（markdown/语法高亮/思维链/选择器/编辑器配色）统一到同一色板。
+// pi 按 PI_CODING_AGENT_DIR 解析 agent 目录，指到我们的 AGENT_DIR 就不会碰 ~/.pi
+try {
+  process.env.PI_CODING_AGENT_DIR = AGENT_DIR;
+  const themeSrc = join(import.meta.dirname, "..", "themes", "catppuccin-mocha.json");
+  const themeDst = join(AGENT_DIR, "themes", "catppuccin-mocha.json");
+  mkdirSync(join(AGENT_DIR, "themes"), { recursive: true });
+  copyFileSync(themeSrc, themeDst);
+  initTheme("catppuccin-mocha");
+} catch {
+  initTheme("dark");
+}
 
 const runtime = await createModelRuntime();
 const mcpTools = await initMcpTools();
@@ -177,7 +189,7 @@ function renderHistory(messages: any[]): void {
           msg as AssistantMessage,
           hasThinking,
           getMarkdownTheme(),
-          hasThinking ? "💭 已思考" : undefined,
+          hasThinking ? "✦ 已思考" : undefined,
         );
         chat.addChild(new BarComponent(comp, fg.accent));
       }
@@ -307,7 +319,7 @@ function openDeleteSelector(): void {
         }
         try {
           deleteSession(id);
-          addLine(fg.dim(`🗑 已删除会话「${title}」`));
+          addLine(fg.dim(`✕ 已删除会话「${title}」`));
         } catch (err) {
           addLine(fg.error(`删除失败：${err instanceof Error ? err.message : String(err)}`));
         }
@@ -350,7 +362,7 @@ function exportSession(): void {
   const file = join(WORKSPACE_ROOT, `oi-pi-导出-${stamp}.md`);
   try {
     writeFileSync(file, out.join("\n"), "utf8");
-    addLine(fg.dim(`📄 已导出：${file}`));
+    addLine(fg.dim(`⇩ 已导出：${file}`));
   } catch (err) {
     addLine(fg.error(`导出失败：${err instanceof Error ? err.message : String(err)}`));
   }
@@ -466,7 +478,7 @@ function onSubmit(text: string) {
         const forkId = newSessionId();
         saveSession(forkId, { model: modelRef(), messages: [...agent.state.messages] });
         sessionId = forkId;
-        addLine(fg.dim("🍴 已分叉出新会话：后续对话写入新会话，原会话停在分叉点"));
+        addLine(fg.dim("⑂ 已分叉出新会话：后续对话写入新会话，原会话停在分叉点"));
       }
     } else if (cmd === "/del") {
       openDeleteSelector();
@@ -616,7 +628,7 @@ function handleAgentEvent(e: AgentEvent) {
       const elapsedS = msgStartAt !== null ? Math.max(1, Math.round((Date.now() - msgStartAt) / 1000)) : 0;
       msgStartAt = null;
       if (hasThinking && streamingMsg) {
-        streamingMsg.setHiddenThinkingLabel(`💭 已思考 ${elapsedS}s`);
+        streamingMsg.setHiddenThinkingLabel(`✦ 已思考 ${elapsedS}s`);
         streamingMsg.setHideThinkingBlock(true);
       }
       // abort/error 时 pi 组件条内自带状态行（Request aborted / 错误信息），这里不再重复打
