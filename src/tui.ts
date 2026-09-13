@@ -20,7 +20,7 @@ import {
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
-import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AGENT_DIR, WORKSPACE_ROOT } from "./config.js";
 import type { Agent, AgentEvent, ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -64,14 +64,47 @@ const addLine = (text: string, paddingX = 1) => {
   tui.requestRender();
 };
 
+// ---------- 输入历史持久化（↑↓ 跨会话找回输过的内容） ----------
+
+const HISTORY_FILE = join(AGENT_DIR, "history.json");
+const HISTORY_CAP = 200;
+
+function loadPromptHistory(): string[] {
+  try {
+    const arr = JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string" && x.trim() !== "").slice(-HISTORY_CAP) : [];
+  } catch {
+    return [];
+  }
+}
+
+function appendPromptHistory(text: string): void {
+  try {
+    const list = loadPromptHistory();
+    if (list[list.length - 1] === text) return; // 连续重复不记
+    list.push(text);
+    writeFileSync(HISTORY_FILE, JSON.stringify(list.slice(-HISTORY_CAP)), "utf8");
+  } catch {
+    // 历史写失败无关紧要
+  }
+}
+
 // ---------- header / 帮助 ----------
 
 const ART = [" ___  ___  ___", "| _ \\/ _ \\|_ _|", "|  _/ (_) || |", "|_|  \\___/|___|"];
 
+const PACKAGE_VERSION = (() => {
+  try {
+    return (JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")) as { version?: string }).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
 function addHeader() {
   for (const l of ART) addLine(fg.accent(l), 1);
   addLine(
-    fg.muted(`信奥助教 · ${agent.state.model.name} · /help 查看命令 · Ctrl+C 中断生成，空闲时退出`),
+    fg.muted(`信奥助教 v${PACKAGE_VERSION} · ${agent.state.model.name} · /help 查看命令 · Esc/Ctrl+C 中断，空闲退出`),
     1,
   );
   chat.addChild(new RuleComponent());
@@ -417,6 +450,8 @@ function resumeSession(id: string): void {
 function onSubmit(text: string) {
   const input = text.trim();
   if (!input) return;
+  editor.addToHistory(input);
+  appendPromptHistory(input);
 
   if (input.startsWith("/")) {
     const space = input.indexOf(" ");
@@ -553,7 +588,7 @@ function onSubmit(text: string) {
       addLine(fg.muted(`模型：${agent.state.model.name}（${modelRef().provider}/${modelRef().id}）`));
       addLine(fg.muted(`上下文窗口：${agent.state.model.contextWindow ?? "?"} tok · 已用 ${(s.ctxPct * 100).toFixed(0)}%`));
       addLine(fg.muted(`会话累计：↑${s.inputTok} ↓${s.outputTok} tok · $${s.cost.toFixed(4)}`));
-      addLine(fg.muted(`思维链：${agent.state.thinkingLevel} · 自动压缩：${AUTOCOMPACT_THRESHOLD > 0 ? `≥${(AUTOCOMPACT_THRESHOLD * 100).toFixed(0)}%` : "关"}`));
+      addLine(fg.muted(`思维链：${agent.state.thinkingLevel} · 版本：v${PACKAGE_VERSION} · 自动压缩：${AUTOCOMPACT_THRESHOLD > 0 ? `≥${(AUTOCOMPACT_THRESHOLD * 100).toFixed(0)}%` : "关"}`));
       addLine(fg.muted(`会话 id：${sessionId}`));
       addLine(fg.muted(`工作目录：${WORKSPACE_ROOT}`));
       addLine(fg.muted(`工具（${agent.state.tools.length}）：${agent.state.tools.map((t) => t.name).join("、")}`));
@@ -910,6 +945,7 @@ const editor = new Editor(
 );
 editor.onSubmit = onSubmit;
 editor.setAutocompleteProvider?.(new SlashAutocomplete());
+for (const h of loadPromptHistory()) editor.addToHistory(h);
 
 tui.addChild(chat);
 tui.addChild(editor);

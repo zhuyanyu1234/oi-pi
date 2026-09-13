@@ -94,7 +94,7 @@ function recordFailure(serverName: string, err: unknown): void {
   process.stderr.write(`[oi-pi] MCP 服务器 ${serverName} 连接失败：${message}\n`);
 }
 
-/** 读取 mcp.json 并连接所有服务器；任何一台失败只警告不阻断。无配置时返回空数组 */
+/** 读取 mcp.json 并并行连接所有服务器；任何一台失败只警告不阻断。无配置时返回空数组 */
 export async function initMcpTools(): Promise<AgentTool<any>[]> {
   let cfg: McpConfig;
   try {
@@ -102,16 +102,18 @@ export async function initMcpTools(): Promise<AgentTool<any>[]> {
   } catch {
     return [];
   }
+  const entries = Object.entries(cfg.servers ?? {}).filter(([, sc]) => sc?.command);
+  for (const [name, sc] of entries) serverConfigs.set(name, sc);
+  // 并行连接：慢服务器不拖累其他工具的挂载
+  const results = await Promise.allSettled(entries.map(([name, sc]) => connectAndMount(name, sc)));
   const all: AgentTool<any>[] = [];
-  for (const [serverName, sc] of Object.entries(cfg.servers ?? {})) {
-    if (!sc?.command) continue;
-    serverConfigs.set(serverName, sc);
-    try {
-      all.push(...(await connectAndMount(serverName, sc)));
-    } catch (err) {
-      recordFailure(serverName, err);
-    }
-  }
+  results.forEach((r, i) => {
+    const entry = entries[i];
+    if (!entry) return;
+    const name = entry[0];
+    if (r.status === "fulfilled") all.push(...r.value);
+    else recordFailure(name, r.reason);
+  });
   return all;
 }
 
