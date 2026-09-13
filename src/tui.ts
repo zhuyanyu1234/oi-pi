@@ -34,7 +34,7 @@ import {
 import { StatusBar } from "./components/status-bar.js";
 import { BarComponent, RuleComponent, SlashAutocomplete, ToolCallComponent } from "./components/chat-widgets.js";
 import { createModelRuntime, createOiAgent, THINKING_LEVELS } from "./session.js";
-import { initMcpTools } from "./mcp.js";
+import { getMcpState, initMcpTools, reconnectServer } from "./mcp.js";
 import { bold, fg } from "./theme.js";
 import { deleteSession, listSessions, loadSession, newSessionId, saveSession } from "./session-store.js";
 
@@ -90,6 +90,7 @@ function printHelp() {
     "/export        导出当前对话为 Markdown",
     "/model [ref]   打开模型选择器 / 直接切换 provider/id",
     "/status        查看模型/上下文占用/累计用量/工具清单/会话信息",
+    "/mcp           查看 MCP 服务器状态与工具，重连失败的",
     "/thinking [级] 查看/切换思维链深度（off|minimal|low|medium|high|xhigh|max，模型需支持）",
     "/exit          退出",
     "/help          显示本帮助",
@@ -368,6 +369,12 @@ function exportSession(): void {
   }
 }
 
+/** 同步终端窗口标题（多标签页时定位当前在问什么） */
+function setTerminalTitle(text: string): void {
+  const clean = text.replace(/[\x00-\x1f\x07]/g, "").slice(0, 40);
+  process.stdout.write(`\x1b]0;oi-pi · ${clean}\x07`);
+}
+
 // ---------- 命令 ----------
 
 function switchModel(ref: string): void {
@@ -550,6 +557,38 @@ function onSubmit(text: string) {
       addLine(fg.muted(`会话 id：${sessionId}`));
       addLine(fg.muted(`工作目录：${WORKSPACE_ROOT}`));
       addLine(fg.muted(`工具（${agent.state.tools.length}）：${agent.state.tools.map((t) => t.name).join("、")}`));
+    } else if (cmd === "/mcp") {
+      const st = getMcpState();
+      if (st.length === 0) {
+        addLine(fg.dim("未配置 MCP 服务器（~/.oi-pi/agent/mcp.json）"));
+        return;
+      }
+      for (const s of st) {
+        const icon = s.status === "ok" ? fg.success("✓") : fg.error("✗");
+        addLine(fg.dim(`${icon} ${s.name} · ${s.status === "ok" ? `${s.toolNames.length} 个工具` : s.error ?? "连接失败"}`));
+        for (const t of s.toolNames) addLine(fg.dim(`      ${t}`));
+      }
+      const failed = st.filter((s) => s.status === "failed");
+      if (failed.length === 0) return;
+      if (agent.state.isStreaming || compacting) {
+        addLine(fg.dim("当前有事在进行，稍后可重连失败的服务器"));
+        return;
+      }
+      openSelector(
+        failed.map((s) => ({ value: s.name, label: `重连 ${s.name}`, description: s.error ?? "连接失败" })),
+        (name) => {
+          addLine(fg.dim(`⟳ 正在重连 ${name}…`));
+          reconnectServer(name)
+            .then((tools) => {
+              // 旧的重名工具换成新连接的
+              agent.state.tools = [...agent.state.tools.filter((t) => !t.name.startsWith(`${name}_`)), ...tools];
+              addLine(fg.dim(`✓ ${name} 已重连，挂载 ${tools.length} 个工具`));
+            })
+            .catch((err: unknown) => {
+              addLine(fg.error(`✗ ${name} 重连失败：${err instanceof Error ? err.message : String(err)}`));
+            });
+        },
+      );
     } else if (cmd === "/thinking") {
       if (agent.state.isStreaming) {
         addLine(fg.warning("正在生成中，稍后再切换思维链深度"));
@@ -583,6 +622,7 @@ function onSubmit(text: string) {
   sawAbort = false;
   lastTurnFailed = false;
   autoRetries = 0;
+  setTerminalTitle(input);
   chat.addChild(new BarComponent(new UserMessageComponent(input, getMarkdownTheme()), fg.accent2));
   loader = new Loader(tui, (s) => fg.accent(s), (s) => fg.muted(s), "思考中…");
   chat.addChild(loader);
@@ -899,11 +939,20 @@ tui.addInputListener((data) => {
 
 statusBar.setModel(agent.state.model.name);
 addHeader();
+setTerminalTitle("信奥助教");
 if (mcpTools.length > 0) {
   addLine(fg.muted(`已接入 MCP 工具：${mcpTools.map((t) => t.name).join("、")}`), 1);
 }
 tui.start();
 
-// 命令行带了初始问题（oi-pi "两数之和怎么入手"）就直接开问
-const initialPrompt = process.argv.slice(2).join(" ").trim();
+// 启动参数：--model provider/id 临时换模型；其余词拼接为初始问题
+const rawArgv = process.argv.slice(2);
+const modelFlag = rawArgv.indexOf("--model");
+if (modelFlag !== -1 && rawArgv[modelFlag + 1]) {
+  switchModel(rawArgv[modelFlag + 1]!);
+}
+const initialPrompt = rawArgv
+  .filter((_, i) => i !== modelFlag && i !== modelFlag + 1)
+  .join(" ")
+  .trim();
 if (initialPrompt) onSubmit(initialPrompt);

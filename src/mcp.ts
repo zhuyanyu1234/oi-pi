@@ -1,4 +1,5 @@
 // MCP 接入：读取 ~/.oi-pi/agent/mcp.json，用官方 SDK 把各服务器的工具接成 AgentTool（stdio 传输）
+// 支持连接状态查询（/mcp）与单服务器重连
 import type { AgentTool, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,6 +23,17 @@ interface McpToolDef {
   description?: string;
   inputSchema?: object;
 }
+
+export interface McpServerStatus {
+  name: string;
+  status: "ok" | "failed";
+  toolNames: string[];
+  error?: string;
+}
+
+const serverConfigs = new Map<string, McpServerConfig>();
+const clients = new Map<string, Client>();
+const serverStates = new Map<string, McpServerStatus>();
 
 /** 连接一台 MCP 服务器（SDK 内部完成 initialize 握手） */
 async function connectServer(name: string, sc: McpServerConfig): Promise<Client> {
@@ -61,6 +73,27 @@ function toAgentTool(client: Client, serverName: string, tool: McpToolDef): Agen
   };
 }
 
+/** 连接并列出某服务器的工具；成功时记录状态并缓存 client */
+async function connectAndMount(serverName: string, sc: McpServerConfig): Promise<AgentTool<any>[]> {
+  const client = await connectServer(serverName, sc);
+  const { tools: list = [] } = await client.listTools();
+  clients.set(serverName, client);
+  const defs = (list as McpToolDef[]).filter((t) => t?.name);
+  const tools = defs.map((t) => toAgentTool(client, serverName, t));
+  serverStates.set(serverName, {
+    name: serverName,
+    status: "ok",
+    toolNames: defs.map((t) => t.name),
+  });
+  return tools;
+}
+
+function recordFailure(serverName: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  serverStates.set(serverName, { name: serverName, status: "failed", toolNames: [], error: message });
+  process.stderr.write(`[oi-pi] MCP 服务器 ${serverName} 连接失败：${message}\n`);
+}
+
 /** 读取 mcp.json 并连接所有服务器；任何一台失败只警告不阻断。无配置时返回空数组 */
 export async function initMcpTools(): Promise<AgentTool<any>[]> {
   let cfg: McpConfig;
@@ -69,24 +102,33 @@ export async function initMcpTools(): Promise<AgentTool<any>[]> {
   } catch {
     return [];
   }
-  const tools: AgentTool<any>[] = [];
+  const all: AgentTool<any>[] = [];
   for (const [serverName, sc] of Object.entries(cfg.servers ?? {})) {
     if (!sc?.command) continue;
+    serverConfigs.set(serverName, sc);
     try {
-      const client = await connectServer(serverName, sc);
-      try {
-        const { tools: list = [] } = await client.listTools();
-        for (const t of list as McpToolDef[]) {
-          if (!t?.name) continue;
-          tools.push(toAgentTool(client, serverName, t));
-        }
-      } catch (err) {
-        await client.close().catch(() => {});
-        throw err;
-      }
+      all.push(...(await connectAndMount(serverName, sc)));
     } catch (err) {
-      process.stderr.write(`[oi-pi] MCP 服务器 ${serverName} 连接失败：${err instanceof Error ? err.message : String(err)}\n`);
+      recordFailure(serverName, err);
     }
   }
+  return all;
+}
+
+/** /mcp 用：各服务器连接状态（只读副本） */
+export function getMcpState(): McpServerStatus[] {
+  return [...serverStates.values()].map((s) => ({ ...s, toolNames: [...s.toolNames] }));
+}
+
+/** 重连一台服务器（先关旧连接），返回新挂载的工具；由调用方负责合并进 agent 工具集 */
+export async function reconnectServer(name: string): Promise<AgentTool<any>[]> {
+  const sc = serverConfigs.get(name);
+  if (!sc) throw new Error(`未配置的 MCP 服务器：${name}`);
+  const old = clients.get(name);
+  if (old) {
+    await old.close().catch(() => {});
+    clients.delete(name);
+  }
+  const tools = await connectAndMount(name, sc);
   return tools;
 }
