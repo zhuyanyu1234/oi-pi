@@ -20,7 +20,9 @@ import {
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENT_DIR, WORKSPACE_ROOT } from "./config.js";
 import type { Agent, AgentEvent, ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -36,6 +38,8 @@ import { BarComponent, RuleComponent, SlashAutocomplete, ToolCallComponent } fro
 import { createModelRuntime, createOiAgent, THINKING_LEVELS } from "./session.js";
 import { getMcpState, initMcpTools, reconnectServer } from "./mcp.js";
 import { bold, fg } from "./theme.js";
+import { readKnowledgeStats } from "./stats.js";
+import { notifyDone } from "./notify.js";
 import { deleteSession, listSessions, loadSession, newSessionId, saveSession } from "./session-store.js";
 
 // 自带 Catppuccin Mocha 主题：把主题文件装进 agent 目录的 themes/ 后按名加载，
@@ -123,6 +127,8 @@ function printHelp() {
     "/export        导出当前对话为 Markdown",
     "/model [ref]   打开模型选择器 / 直接切换 provider/id",
     "/status        查看模型/上下文占用/累计用量/工具清单/会话信息",
+    "/stats         学习统计：知识点掌握进度/等级与难度分布/历史会话数",
+    "/edit [草稿]   打开外部编辑器（$VISUAL/$EDITOR）写长输入，保存退出后回到输入框",
     "/mcp           查看 MCP 服务器状态与工具，重连失败的",
     "/thinking [级] 查看/切换思维链深度（off|minimal|low|medium|high|xhigh|max，模型需支持）",
     "/exit          退出",
@@ -408,6 +414,79 @@ function setTerminalTitle(text: string): void {
   process.stdout.write(`\x1b]0;oi-pi · ${clean}\x07`);
 }
 
+/** /stats：知识点掌握进度 + 等级/难度分布 + 会话数 */
+function showStats(): void {
+  let stats;
+  try {
+    stats = readKnowledgeStats();
+  } catch (err) {
+    addLine(fg.warning(`读取知识清单失败（prompts/knowledge.md）：${err instanceof Error ? err.message : String(err)}`));
+    return;
+  }
+  const pct = stats.total > 0 ? (stats.mastered / stats.total) * 100 : 0;
+  addLine(fg.text("── 学习统计 ──"), 0);
+  addLine(fg.muted(`知识点：${stats.mastered}/${stats.total} 已掌握（${pct.toFixed(1)}%）`));
+  for (const s of stats.sections) {
+    const p = s.total > 0 ? Math.round((s.mastered / s.total) * 100) : 0;
+    addLine(fg.dim(`  ${s.title}：${s.mastered}/${s.total}（${p}%）`));
+  }
+  if (stats.grades.size > 0) {
+    const dist = [...stats.grades.entries()].sort((a, b) => a[0] - b[0]).map(([g, n]) => `等级 ${g} × ${n}`).join(" · ");
+    addLine(fg.muted(`掌握等级分布：${dist}`));
+  }
+  const touched = stats.difficulties.filter((d) => d.mastered > 0);
+  if (touched.length > 0) {
+    addLine(fg.muted(`难度分布（已掌握/总数）：${touched.map((d) => `【${d.level}】${d.mastered}/${d.total}`).join(" · ")}`));
+  }
+  addLine(fg.muted(`历史会话：${listSessions().length} 个 · 输入历史 ${loadPromptHistory().length} 条`));
+}
+
+// ---------- 外部编辑器（/edit）：挂起 TUI → $EDITOR 写草稿 → 回填输入框 ----------
+
+const EDITOR_COMMAND =
+  process.env.VISUAL || process.env.EDITOR || (process.platform === "win32" ? "notepad" : "nano");
+
+async function editInExternalEditor(prefill: string): Promise<void> {
+  if (agent.state.isStreaming || compacting) {
+    addLine(fg.warning("当前有事在进行，稍后再用 /edit"));
+    return;
+  }
+  closeSelector();
+  const dir = mkdtempSync(join(tmpdir(), "oi-pi-editor-"));
+  const file = join(dir, "prompt.md");
+  try {
+    writeFileSync(file, prefill, "utf8");
+    const [cmd, ...args] = EDITOR_COMMAND.split(" ");
+    if (!cmd) throw new Error("编辑器命令为空，请设置 $EDITOR");
+    tui.stop(); // 恢复 cooked mode，键盘交给编辑器
+    process.stdout.write(`⌨ 打开外部编辑器 ${EDITOR_COMMAND}，保存退出后内容回到输入框…\n`);
+    // 不用 spawnSync：同步等待会占住 stdin 读，与 vim 抢输入（pi 同款注释）
+    const spawnOk = await new Promise<boolean>((resolve) => {
+      const child = spawn(cmd, [...args, file], { stdio: "inherit" });
+      child.on("error", () => resolve(false));
+      child.on("close", () => resolve(true));
+    });
+    if (!spawnOk) {
+      addLine(fg.error(`无法启动编辑器「${EDITOR_COMMAND}」，请设置 $VISUAL/$EDITOR`));
+      return;
+    }
+    const content = readFileSync(file, "utf8").replace(/^\uFEFF/, "").replace(/\n+$/, "");
+    if (!content.trim()) {
+      addLine(fg.dim("编辑器内容为空，输入框保持原样"));
+      return;
+    }
+    editor.setText(content);
+  } catch (err) {
+    addLine(fg.error(`/edit 失败：${err instanceof Error ? err.message : String(err)}`));
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {}
+    tui.start();
+    tui.requestRender(true);
+  }
+}
+
 // ---------- 命令 ----------
 
 function switchModel(ref: string): void {
@@ -592,6 +671,10 @@ function onSubmit(text: string) {
       addLine(fg.muted(`会话 id：${sessionId}`));
       addLine(fg.muted(`工作目录：${WORKSPACE_ROOT}`));
       addLine(fg.muted(`工具（${agent.state.tools.length}）：${agent.state.tools.map((t) => t.name).join("、")}`));
+    } else if (cmd === "/stats") {
+      showStats();
+    } else if (cmd === "/edit") {
+      void editInExternalEditor(arg);
     } else if (cmd === "/mcp") {
       const st = getMcpState();
       if (st.length === 0) {
@@ -748,6 +831,14 @@ function handleAgentEvent(e: AgentEvent) {
       const comp = toolCalls.get(e.toolCallId);
       toolCalls.delete(e.toolCallId);
       const details = e.result?.details;
+      // judge/stress 跑得久，结束时响铃 + 桌面通知（OI_PI_NOTIFY=0 关闭）；用户主动中断的不提醒
+      if (e.toolName === "judge" || e.toolName === "stress") {
+        const summary = typeof details?.summary === "string" ? details.summary : "";
+        const full = `${summary}\n${extractText(e.result?.content, "\n")}`;
+        if (!/aborted|中断/i.test(full)) {
+          notifyDone(`${e.toolName === "judge" ? "判题" : "对拍"}${e.isError ? "失败" : "完成"}：${summary}`);
+        }
+      }
       if (e.toolName === "judge" && !e.isError && isJudgeDetails(details)) {
         // 整块替换运行中行，卡片成为唯一记录
         if (comp) chat.removeChild(comp);

@@ -73,7 +73,7 @@ pnpm install
 
 默认使用 `OI_PI_MODEL` 指定的模型（格式 `provider/modelId`，默认 `agnes/agnes-2.5-flash`）；
 也可以在项目根放 `.env` 写环境变量，或用 `OI_PI_AGENT_DIR` 把整个配置目录换到别处。
-其他环境变量：`OI_PI_THINKING`（思维链深度，默认 `off`）、`OI_PI_WORKSPACE`（文件工具允许根目录，默认进程 cwd）、`OI_PI_AUTOCOMPACT`（上下文自动压缩阈值，默认 `0.85`，设 `0` 关闭）。
+其他环境变量：`OI_PI_THINKING`（思维链深度，默认 `off`）、`OI_PI_WORKSPACE`（文件工具允许根目录，默认进程 cwd）、`OI_PI_AUTOCOMPACT`（上下文自动压缩阈值，默认 `0.85`，设 `0` 关闭）、`OI_PI_NOTIFY=0`（judge/stress 结束后不发响铃与桌面通知，默认开）。
 
 ## 运行
 
@@ -107,6 +107,8 @@ pnpm smoke:judge    # judge 工具冒烟（本地编译运行，不需要 API）
 | `/retry` | 重试上一轮失败的提问（限流/超时类错误自动退避重试 ≤2 次） |
 | `/rewind` | 回退到历史任意提问：原样重跑或撤掉重新输入 |
 | `/status` | 查看模型/上下文占用/累计用量/工具清单/会话信息 |
+| `/stats` | 学习统计：知识点掌握进度、按章节/难度分布、掌握等级分布、历史会话数 |
+| `/edit [草稿]` | 打开外部编辑器（`$VISUAL`/`$EDITOR`，默认 nano）写长输入，保存退出后内容回到输入框 |
 | `/mcp` | 查看 MCP 服务器状态与工具，失败的可选择重连 |
 | `/compact` | 把对话历史压缩成摘要 + 最近几条（上下文吃紧时用；超过阈值也会自动压缩，`OI_PI_AUTOCOMPACT=0` 关闭） |
 | `/fork` | 从当前对话分叉出新会话（原会话停在分叉点） |

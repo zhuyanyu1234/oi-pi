@@ -4,6 +4,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { JudgeCardComponent, judgeAllPassed, judgeFoldedLine, type JudgeDetails } from "./components/judge-card.js";
 import { StatusBar } from "./components/status-bar.js";
 import { BarComponent, SlashAutocomplete } from "./components/chat-widgets.js";
+import { parseKnowledgeStats } from "./stats.js";
 
 const allAC: JudgeDetails = {
   summary: "3/3 通过 · 最长 12ms",
@@ -53,6 +54,29 @@ sb.stopStreaming();
 sb.reset();
 for (const l of sb.render(80)) console.log(JSON.stringify(l));
 
+console.log("\n=== 学习统计解析 ===");
+const knowledgeSample = `# 清单
+## 一、入门级
+- [x] 整数型：int、long long【1】（等级 3：会模板会变通）
+- [ ] 多层循环语句【3】
+- [x] for 语句、while 语句【2】（等级 2）
+## 二、提高级
+- [x] 线段树（区间查询 / 区间更新）【7】（等级 1：只会模板）
+- [ ] 树链剖分【8】
+`;
+const ks = parseKnowledgeStats(knowledgeSample);
+console.log(
+  "total=", ks.total,
+  "mastered=", ks.mastered,
+  "sections=", JSON.stringify(ks.sections),
+  "grades=", JSON.stringify([...ks.grades.entries()].sort((a, b) => a[0] - b[0])),
+  "difficulties=", JSON.stringify(ks.difficulties),
+);
+if (ks.total !== 5 || ks.mastered !== 3) throw new Error("统计总数不对");
+if (ks.sections.length !== 2 || ks.sections[0]!.mastered !== 2 || ks.sections[1]!.mastered !== 1) throw new Error("分章统计不对");
+if (ks.grades.get(3) !== 1 || ks.grades.get(2) !== 1 || ks.grades.get(1) !== 1) throw new Error("等级分布不对");
+if (ks.difficulties.find((d) => d.level === 7)?.mastered !== 1) throw new Error("难度统计不对");
+
 console.log("\n=== 色条 ===");
 const bar = new BarComponent(new Text("hello 世界", 0, 0), (s) => `\x1b[38;2;148;226;213m${s}\x1b[0m`);
 for (const l of bar.render(40)) console.log(JSON.stringify(l));
@@ -60,9 +84,11 @@ for (const l of bar.render(40)) console.log(JSON.stringify(l));
 console.log("\n=== 补全 ===");
 const ac = new SlashAutocomplete();
 const sig = { signal: new AbortController().signal, force: false };
-for (const token of ["/", "/n", "/ne", "/new", "hi /mo", "你好/new"]) {
+for (const token of ["/", "/n", "/ne", "/new", "/sta", "/ed", "hi /mo", "你好/new"]) {
   const r = await ac.getSuggestions([token], 0, token.length, sig);
   console.log(JSON.stringify(token), "→", r ? r.items.map((i) => i.value).join(",") : "null");
 }
+const statHit = await ac.getSuggestions(["/st"], 0, 3, sig);
+if (!statHit?.items.some((i) => i.value === "/stats")) throw new Error("补全里没有 /stats");
 const applied = ac.applyCompletion(["/r"], 0, 2, { value: "/resume", label: "/resume" }, "/r");
 console.log("apply /r →", JSON.stringify(applied));
