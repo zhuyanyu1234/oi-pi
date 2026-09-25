@@ -1,5 +1,5 @@
 {
-  "name": "oi-pi",
+  "name": "@zhuyanyv1/oi-pi",
   "version": "1.0.0",
   "description": "信奥助教：终端里的 C++ 信息学竞赛教练（提问式教学 + OJ 式判题）",
   "license": "MIT",
@@ -16,6 +16,28 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhuyanyu1234/oi-pi.git"
+  },
+  "homepage": "https://github.com/zhuyanyu1234/oi-pi#readme",
+  "bugs": {
+    "url": "https://github.com/zhuyanyu1234/oi-pi/issues"
+  },
+  "keywords": [
+    "oi",
+    "csp",
+    "noip",
+    "competitive-programming",
+    "tui",
+    "agent",
+    "cli",
+    "cpp",
+    "judge"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "start": "tsx src/tui.ts",
